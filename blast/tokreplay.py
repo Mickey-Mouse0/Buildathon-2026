@@ -262,6 +262,10 @@ def changed_spots(files, src):
                 elsewhere = True
                 continue
             fn = max(inner, key=lambda n: n.lineno)
+            if any(isinstance(n, ast.Lambda) and n.lineno == n.end_lineno for n in inner):
+                # code inside a one-line lambda: neither the import diff (a function's
+                # fingerprint leaves out its code) nor the call recording sees it
+                return None
             first = fn.body.lineno if isinstance(fn, ast.Lambda) else fn.body[0].lineno
             if l < first or (isinstance(fn, ast.Lambda) and l == fn.lineno and fn.lineno == fn.end_lineno):
                 elsewhere = True
