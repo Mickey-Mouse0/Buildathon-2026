@@ -133,6 +133,88 @@ def import_diff(analyzer, files, notes):
     return analyzer.diff_tests(_baseline[0], pickle.loads(r.stdout), notes)
 
 
+TPC_MAP = os.environ.get("BLAST_TPC_MAP", str(HERE / "tpc_map.pkl.gz"))
+TPC_EXPECTED = os.environ.get("BLAST_TPC_EXPECTED", str(HERE / "tpc_expected.pkl"))
+_tpc = []
+
+
+def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
+    """Drop a TPC executor test when the queries the patch reaches all give the
+    pinned commit's results (blast/tpcmap.py). Queries it doesn't reach can't
+    change, by the per-query map."""
+    if not (os.path.exists(TPC_MAP) and os.path.exists(TPC_EXPECTED)):
+        return chosen
+    if not _tpc:
+        import gzip
+
+        with gzip.open(TPC_MAP, "rb") as f:
+            qmaps = pickle.load(f)
+        with open(TPC_EXPECTED, "rb") as f:
+            cpu = {t: [r["cpu"] for r in rows] for t, rows in pickle.load(f).items()}
+        _tpc.append((qmaps, cpu))
+    qmaps, cpu = _tpc[0]
+    m = analyzer.m
+    drop, jobs, est = set(), {}, 0.0
+    for test_id, qm in qmaps.items():
+        n = by_id.get(test_id)
+        if n is None or n not in chosen:
+            continue
+        sub = Maps.__new__(Maps)
+        sub.__dict__.update(m.__dict__)
+        sub.__dict__.update({k: qm[k] for k in ("tests", "line2t", "open2t", "attr2t", "cls2t")})
+        sub.tests_by_file = {}
+        sub.all = frozenset(range(len(qm["tests"])))
+        qa = Analyzer(sub)
+        q, notes = qa.analyze(text, files)
+        if q is None:
+            log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: all queries ({'; '.join(notes[-2:])})")
+            continue
+        if not q:
+            log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: no query reaches the change")
+            drop.add(n)
+            continue
+        jobs[test_id] = sorted(q)
+        est += sum(cpu[test_id][i] for i in q)
+    if jobs:
+        rest = [x for x in chosen if x not in drop]
+        gain = cost(rest, ms) - cost([x for x in rest if x not in {by_id[t] for t in jobs}], ms)
+        # the check costs CPU whether or not it clears the tests, so only run it
+        # with a margin over what dropping them would save
+        if (est + 0.5) * 1000 >= 0.8 * gain:
+            log(cid, f"tpc check skipped: ~{est:.1f}s of queries for {gain / 1000:.1f}s")
+        else:
+            overlay = {}
+            for fc in files:
+                p = fc.path
+                if fc.new_path is None or not p.endswith(".py"):
+                    if p.startswith("sqlglot/"):
+                        overlay = None
+                        break
+                    continue
+                if not p.startswith("sqlglot/"):
+                    continue
+                old = ""
+                if fc.old_path is not None:
+                    with open(os.path.join(SRC, fc.old_path)) as f:
+                        old = f.read()
+                overlay[fc.new_path] = fc.apply(old)
+                if overlay[fc.new_path] is None:
+                    overlay = None
+                    break
+            if overlay is not None:
+                env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SKIP_INTEGRATION="0")
+                r = subprocess.run([sys.executable, str(HERE / "tpcmap.py"), "check", SRC, TPC_EXPECTED],
+                                   input=pickle.dumps({"overlay": overlay, "jobs": jobs}),
+                                   capture_output=True, env=env, timeout=120)
+                verdict = pickle.loads(r.stdout) if r.returncode == 0 else {}
+                for test_id, qs in jobs.items():
+                    ok = verdict.get(test_id, False)
+                    log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: {len(qs)} queries reached, {'same results, dropped' if ok else 'kept'}")
+                    if ok:
+                        drop.add(by_id[test_id])
+    return [x for x in chosen if x not in drop]
+
+
 def main():
     # The maps are millions of small objects; the cycle collector would rescan them
     # over and over while they load. Nothing here builds garbage cycles worth freeing.
@@ -213,6 +295,11 @@ def main():
                         log(cid, "prover dropped", dropped)
             except Exception as e:
                 log(cid, "prover error, keeping the selector's tests:", repr(e))
+        if analyzer is not None and chosen:
+            try:
+                chosen = tpc_check(cid, analyzer, files, text, chosen, ms, by_id)
+            except Exception as e:
+                log(cid, "tpc check error, keeping the tests:", repr(e))
         workers = pack(chosen, ms)
         if workers:
             total += max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)
