@@ -221,6 +221,92 @@ class Analyzer:
         notes.append(f"TPC file: {len(tests) - len(out)} executor tests dropped")
         return out
 
+    # ---- test files ------------------------------------------------------
+    def _test_importers(self, path):
+        """Test files that import this one (`from tests.x.y import ...`), transitively."""
+        if not hasattr(self, "_timp"):
+            imp = {}
+            root = os.path.join(self.m.src, "tests")
+            for dp, _, fns in os.walk(root):
+                for fn in fns:
+                    if fn.endswith(".py"):
+                        f = os.path.relpath(os.path.join(dp, fn), self.m.src)
+                        with open(os.path.join(dp, fn), encoding="utf-8", errors="replace") as fh:
+                            for line in fh:
+                                t = line.split()
+                                if len(t) >= 2 and t[0] in ("from", "import") and t[1].startswith("tests."):
+                                    imp.setdefault(t[1].replace(".", "/") + ".py", set()).add(f)
+            self._timp = imp
+        seen, todo = set(), [path]
+        while todo:
+            for f in self._timp.get(todo.pop(), ()):
+                if f not in seen:
+                    seen.add(f)
+                    todo.append(f)
+        return seen
+
+    def test_file(self, fc, path, s, notes):
+        """Tests an edit to a test module can change. When only test_* methods differ,
+        just those tests (and same-named ones in subclasses elsewhere); otherwise the
+        file's tests plus those of every test file importing it."""
+        m = self.m
+        with open(os.path.join(m.src, path), encoding="utf-8") as f:
+            old = f.read()
+        new = fc.apply(old)
+        if new is None:
+            notes.append("patch does not apply")
+            return None
+        try:
+            oldt, newt = ast.parse(old), ast.parse(new)
+        except SyntaxError:
+            notes.append(f"test file {path} broken: whole file")
+            return set(s)
+
+        def split(tree):
+            rest, meths = [], {}
+            for st in tree.body:
+                if isinstance(st, ast.ClassDef):
+                    body = []
+                    for x in st.body:
+                        if isinstance(x, FUNC) and x.name.startswith("test"):
+                            meths[(st.name, x.name)] = ast.dump(x)
+                        else:
+                            body.append(x)
+                    rest.append(ast.dump(ast.ClassDef(st.name, st.bases, st.keywords, body, st.decorator_list, [])))
+                elif isinstance(st, FUNC) and st.name.startswith("test"):
+                    meths[(None, st.name)] = ast.dump(st)
+                else:
+                    rest.append(ast.dump(st))
+            return rest, meths
+
+        orest, ometh = split(oldt)
+        nrest, nmeth = split(newt)
+        if orest != nrest:
+            out = set(s)
+            imps = self._test_importers(path)
+            for f in imps:
+                out |= m.tests_by_file.get(f, set())
+            notes.append(f"test file {path}: {len(out)} (helpers changed; {len(imps)} importing files)")
+            return out
+        changed = {k for k in ometh if ometh[k] != nmeth.get(k)}
+        if not hasattr(m, "_test_ids"):
+            ids = {}
+            for i, t in enumerate(m.tests):
+                ids.setdefault(t.split("[")[0].rsplit("::", 1)[-1], []).append(i)
+            m._test_ids = ids
+        out = set()
+        own = {f"{path}::{c}::{n}" if c else f"{path}::{n}" for c, n in changed}
+        names = {n for _, n in changed}
+        importers = self._test_importers(path)
+        for n in names:
+            for i in m._test_ids.get(n, ()):
+                t = m.tests[i].split("[")[0]
+                # this file's test, or the same method inherited by a class elsewhere
+                if t in own or t.split("::")[0] in importers:
+                    out.add(i)
+        notes.append(f"test file {path}: {len(out)} of {len(s)} (changed tests {sorted(names)[:4]})")
+        return out
+
     # ---- module constants -----------------------------------------------
     def module_global(self, path, names, notes, depth=0, own_file=False):
         """own_file: only code in this module can see the name (a module object
@@ -394,7 +480,9 @@ class Analyzer:
                 if s is None:
                     notes.append(f"test helper {path}")
                     return None, notes
-                notes.append(f"test file {path}: {len(s)}")
+                s = self.test_file(fc, path, s, notes)
+                if s is None:
+                    return None, notes
                 out |= s
             elif path.startswith("sqlglot/") and path.endswith(".py"):
                 try:
