@@ -67,6 +67,7 @@ def name_index(src):
     ("module", path, targets): a module-level statement that mentions it
     """
     idx = defaultdict(list)
+    gidx = defaultdict(set)
     # tests/ too: a test can read a module constant directly (test_typing reads
     # every typing module's EXPRESSION_METADATA through importlib)
     walk = [w for top in ("sqlglot", "tests") for w in os.walk(os.path.join(src, top))]
@@ -80,6 +81,8 @@ def name_index(src):
             with open(os.path.join(src, path)) as f:
                 tree = ast.parse(f.read())
             modname = path[:-3].replace("/", ".").removesuffix(".__init__")
+            imported = {(a.asname or a.name).split(".")[0] for n in ast.walk(tree)
+                        if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
 
             def visit(body, qual, inclass):
                 for st in body:
@@ -96,6 +99,8 @@ def name_index(src):
                         entry = ("func", path, start, st.body[0].lineno, st.end_lineno)
                         for nm in names:
                             idx[nm].append(entry)
+                        for nm in global_mentions(st, imported):
+                            gidx[nm].add((path, start))
                     elif isinstance(st, ast.ClassDef):
                         visit(st.body, qual + [st.name], True)
                     else:
@@ -110,7 +115,80 @@ def name_index(src):
                             idx[nm].append(entry)
 
             visit(tree.body, [], False)
-    return dict(idx)
+    return dict(idx), {k: frozenset(v) for k, v in gidx.items()}
+
+
+def global_mentions(fn, imported=frozenset()):
+    """Names a function mentions in a way that could read a module global: a bare
+    name, a string (getattr, importlib), or an attribute of anything except self,
+    cls, a parameter or a local that plain assignments bind to a non-module value
+    (dialect.EXPRESSION_METADATA reads the Dialect class setting, which the import
+    diff tracks, not the typing module's dict of that name). A name that is also
+    imported, or bound any other way (for, with, global, ...), still counts."""
+    ok, bad = {"self", "cls"}, set(imported)
+    for n in ast.walk(fn):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            a = n.args
+            ok |= {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs}
+            ok |= {x.arg for x in (a.vararg, a.kwarg) if x is not None}
+        elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+            tg = n.targets if isinstance(n, ast.Assign) else [n.target]
+            plain = n.value is not None and not _module_like(n.value)
+            for t in tg:
+                if isinstance(t, ast.Name):
+                    (ok if plain else bad).add(t.id)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            bad |= set(n.names)
+    for n in ast.walk(fn):
+        for t in _other_targets(n):
+            bad.add(t)
+    local = ok - bad
+    out = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name):
+            out.add(n.id)
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.isidentifier():
+            out.add(n.value)
+        elif isinstance(n, ast.Attribute):
+            root = n.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if not (isinstance(root, ast.Name) and root.id in local):
+                out.add(n.attr)
+    return out
+
+
+def _module_like(v):
+    """Could this expression evaluate to a module object?"""
+    for x in ast.walk(v):
+        if isinstance(x, ast.Name) and x.id in ("__import__", "import_module", "reload", "modules", "getattr", "vars"):
+            return True
+        if isinstance(x, ast.Attribute) and x.attr in ("import_module", "reload", "modules", "__dict__"):
+            return True
+    return isinstance(v, ast.Name)  # an alias of another name, e.g. m = some_module
+
+
+def _other_targets(n):
+    """Names bound by anything but a plain assignment or a parameter."""
+    tg = []
+    if isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+        tg.append(n.target)
+    elif isinstance(n, (ast.With, ast.AsyncWith)):
+        tg += [i.optional_vars for i in n.items if i.optional_vars is not None]
+    elif isinstance(n, ast.NamedExpr):
+        tg.append(n.target)
+    elif isinstance(n, ast.AugAssign):
+        tg.append(n.target)
+    elif isinstance(n, ast.ExceptHandler) and n.name:
+        return [n.name]
+    elif isinstance(n, (ast.Import, ast.ImportFrom)):
+        return [(a.asname or a.name).split(".")[0] for a in n.names]
+    elif isinstance(n, ast.Assign):
+        tg += [t for t in n.targets if not isinstance(t, ast.Name)]  # unpacking
+    elif isinstance(n, ast.match_case):
+        return [x.name for x in ast.walk(n.pattern) if getattr(x, "name", None)]
+    return [x.id for t in tg for x in ast.walk(t) if isinstance(x, ast.Name)]
+
 
 
 def main(raw_dir, src, out):
@@ -157,8 +235,8 @@ def main(raw_dir, src, out):
         "cls2t": {k: intern(v) for k, v in cls2t.items()},
         "subclasses": {k: tuple(sorted(v)) for k, v in subclasses.items()},
         "tests_by_file": {k: frozenset(v) for k, v in by_file.items()},
-        "names": name_index(src),
     }
+    data["names"], data["gnames"] = name_index(src)
     with gzip.open(out, "wb", compresslevel=9) as f:
         pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"map: {len(ids)} tests, {sum(len(m) for m in line2t.values())} lines, "

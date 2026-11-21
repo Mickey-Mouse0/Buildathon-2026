@@ -419,7 +419,13 @@ def main():
                         except Exception as e:
                             notes.append(f"import diff error {e!r}")
                             extra = None
-                        if extra is not None:
+                        if extra is not None and not d["all"] and \
+                                cost(base | num(d["fallback"]), ms) < cost(base | num(extra), ms):
+                            # both are safe answers; the diff can name more tests (a new
+                            # class shows up in every registry it lands in)
+                            idx = idx | d["fallback"]
+                            notes.append("import diff: fallback is cheaper")
+                        elif extra is not None:
                             idx = idx | extra
                         elif d["all"]:
                             idx = None

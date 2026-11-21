@@ -354,18 +354,26 @@ class Analyzer:
         return out
 
     # ---- module constants -----------------------------------------------
-    def module_global(self, path, names, notes, depth=0, own_file=False):
+    def module_global(self, path, names, notes, depth=0, own_file=False, funcs_only=False):
         """own_file: only code in this module can see the name (a module object
-        bound by `import x`: nothing reaches it as othermodule.x)."""
+        bound by `import x`: nothing reaches it as othermodule.x).
+        funcs_only: only code that reads it at run time. For the import diff, which
+        lists every class setting and module global built from it as its own entry."""
         m = self.m
         out = set()
         modname = path[:-3].replace("/", ".").removesuffix(".__init__")
+        gnames = getattr(m, "gnames", None)
         for n in names:
+            g = gnames.get(n, frozenset()) if gnames is not None else None
             for e in m.names.get(n, ()):
                 if own_file and e[1] != (modname if e[0] == "classbody" else path):
                     continue
                 if e[0] == "func":
+                    if g is not None and (e[1], e[2]) not in g:
+                        continue  # mentions it only as self.x / param.x: not this global
                     out |= m.func_range(e[1], e[2], e[4])
+                elif funcs_only:
+                    continue
                 elif e[0] == "classbody":
                     _, mod, q, tg, refs = e
                     if (None, n) in refs and tg:
@@ -652,7 +660,7 @@ class Analyzer:
                 # a module bound by `import x` (added or dropped) is seen only by
                 # code in this file, unless another module star-imports this one
                 own = kinds == {"module"} and not self._star_imported(mod)
-                s = self.module_global(path, {name}, notes, own_file=own)
+                s = self.module_global(path, {name}, notes, own_file=own, funcs_only=True)
                 out |= s
         notes.append(f"import diff: {len(changed)} changed, {len(out)} tests")
         return out
