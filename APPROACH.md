@@ -85,3 +85,13 @@ Before the fixes, 5 of the 17 lemma checks failed. All pass now. With the new pr
 **Limits.** Profiles were recorded on macOS with Python 3.13, not inside the pinned image. A test that takes a different path in the scorer's environment could evaluate inputs we never recorded. The prover makes no claims about class-level constants (`WEEK_OFFSET = -2`). Real feature commits mostly add statements and fall back to the selector.
 
 To rebuild the prover's data or check it against planted bugs, see `tools/prover/README.md`. `tools/prover/rebuild.sh` runs the whole pipeline.
+
+## Blind spots fixed after the first practice miss
+
+- **Per-process caches.** `generator._DISPATCH_CACHE` is filled once per process, so `_build_dispatch` was credited to whichever test ran first (47 tests; it really affects 1,347). The recorder now resets every module-level dict/list/set in sqlglot before each test. A planted `and`/`or` flip there was missed by the earlier versions and is caught now.
+- **Code run while sqlglot is imported.** Metaclasses, `__init_subclass__` and helpers called from class bodies run before any test. A change in such a function body now runs everything, unless the function is a factory whose output lives on in the functions it returns; then the tests that ran those.
+- **Constants read directly by tests.** Module constants are looked up in `tests/` too (`test_typing` reads `EXPRESSION_METADATA`).
+- The prover's "never executed" lemma now reads this map, which has the same fixes and was recorded in the scorer's base image.
+- The cycle collector is off while the maps load: CPU on the samples went from 3.9 s to 1.3 s.
+
+Checked: samples 124.9 s, 0 misses. Planted-bug and real-commit checks are being re-labeled (the first labels missed SUBFAILED subtests).
