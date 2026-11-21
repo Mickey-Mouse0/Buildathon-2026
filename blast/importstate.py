@@ -39,8 +39,17 @@ import types
 OPAQUE = "!opaque"
 
 
+_blake = hashlib.blake2b
+
+
 def _h(*parts):
-    return hashlib.blake2b(repr(parts).encode(), digest_size=12).digest()
+    # bytes parts (child digests, often megabytes joined) go in raw, length first,
+    # instead of through repr(), which was most of the time spent here
+    return _blake(b"\0".join([b"%d:" % len(p) + p if type(p) is bytes else repr(p).encode() for p in parts]),
+                  digest_size=12).digest()
+
+
+_LEAVES = (type(None), bool, int, float, complex, str, bytes)
 
 
 class _Canon:
@@ -48,16 +57,18 @@ class _Canon:
 
     def __init__(self):
         self.memo = {}
-        self.leaves = {}
+        # one table per leaf type: True == 1 and 0.0 == -0.0 must not share a digest
+        self.leaves = {t: {} for t in _LEAVES}
         self.opaque = False
 
     def __call__(self, v):
         t = type(v)
-        if v is None or t in (bool, int, float, complex, str, bytes):
-            k = (t, repr(v)) if t in (float, complex) else (t, v)  # 0.0 == -0.0
-            hit = self.leaves.get(k)
+        table = self.leaves.get(t)
+        if table is not None:
+            k = repr(v) if t is float or t is complex else v
+            hit = table.get(k)
             if hit is None:
-                hit = self.leaves[k] = _h(t.__name__, v)
+                hit = table[k] = _h(t.__name__, v)
             return hit
         if isinstance(v, enum.Enum):
             return _h("enum", type(v).__module__, type(v).__qualname__, v.name)
