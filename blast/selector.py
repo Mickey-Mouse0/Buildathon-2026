@@ -26,6 +26,9 @@ IMPORT_STATE = os.environ.get("BLAST_IMPORT_STATE", str(HERE / "importstate.pkl"
 KEYMAP = os.environ.get("BLAST_KEYMAP", str(HERE / "keymap.pkl.gz"))
 TOKREPLAY = os.environ.get("BLAST_TOKREPLAY", str(HERE / "tokreplay.pkl.xz"))
 TOKREPLAY_BASE = os.environ.get("BLAST_TOKREPLAY_BASE", str(HERE / "tokreplay_base.pkl"))
+# Off by default: in the image it costs about 0.35 s of CPU a commit and saved less than
+# that on every set we measured (samples, 30 full-suite commits, 309 planted bugs).
+TOKREPLAY_ON = os.environ.get("BLAST_TOKREPLAY_ON", "0") == "1"
 # Replay only when the tests it could drop are worth this many times its CPU.
 REPLAY_MARGIN = float(os.environ.get("BLAST_REPLAY_MARGIN", "1.5"))
 # Only pay for an import diff (~1 s of CPU) when its fallback would cost more than this.
@@ -156,7 +159,9 @@ def patched_import(files, notes, replay=None, budget=None, **replay_opts):
     want = {k: _baseline[0]["snap"][k][0] for k in _baseline[0].get("dicts", ())}
     payload = {"files": overlay, "dicts": want, "replay": replay, "budget": budget, **replay_opts}
     r = subprocess.run([sys.executable, str(HERE / "importstate.py"), "patched", SRC],
-                       input=pickle.dumps(payload), capture_output=True, env=env, timeout=min(150, _time_left()))
+                       input=pickle.dumps(payload), capture_output=True, env=env,
+                       # an import takes about a second; a patch that makes it loop must not eat the run
+                       timeout=min(150 if replay is not None else 20, _time_left()))
     if r.returncode != 0:
         notes.append(f"import diff failed: {r.stderr.decode(errors='replace')[-200:]}")
         return None
@@ -253,6 +258,7 @@ def tokenizer_replay(tok, maps, files, chosen, ms, notes):
 
 TPC_MAP = os.environ.get("BLAST_TPC_MAP", str(HERE / "tpc_map.pkl.gz"))
 TPC_EXPECTED = os.environ.get("BLAST_TPC_EXPECTED", str(HERE / "tpc_expected.pkl"))
+NO_STAGED_TPC = os.environ.get("BLAST_NO_STAGED_TPC") == "1"
 _tpc = []
 
 
@@ -329,9 +335,11 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
         with gzip.open(TPC_MAP, "rb") as f:
             qmaps = pickle.load(f)
         with open(TPC_EXPECTED, "rb") as f:
-            cpu = {t: [r["cpu"] for r in rows] for t, rows in pickle.load(f).items()}
-        _tpc.append((qmaps, cpu))
-    qmaps, cpu = _tpc[0]
+            exp = pickle.load(f)
+        cpu = {t: [r["cpu"] for r in rows] for t, rows in exp.items()}
+        front_cpu = {t: [r.get("front") for r in rows] for t, rows in exp.items()}
+        _tpc.append((qmaps, cpu, front_cpu))
+    qmaps, cpu, front_cpu = _tpc[0]
     drop, jobs, est = set(), {}, 0.0
     for test_id, qm in qmaps.items():
         n = by_id.get(test_id)
@@ -339,13 +347,15 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
             continue
         if test_id not in index_of or any(index_of[test_id] in m.open2t[p] for p in others):
             continue
-        sub = Maps.__new__(Maps)
-        sub.__dict__.update(m.__dict__)
-        sub.__dict__.update({k: qm[k] for k in ("tests", "line2t", "open2t", "attr2t", "cls2t")})
-        sub.tests_by_file = {}
-        sub.all = frozenset(range(len(qm["tests"])))
-        qa = Analyzer(sub)
-        q, notes = qa.analyze(text, files)
+        def reached(qm):
+            sub = Maps.__new__(Maps)
+            sub.__dict__.update(m.__dict__)
+            sub.__dict__.update({k: qm[k] for k in ("tests", "line2t", "open2t", "attr2t", "cls2t")})
+            sub.tests_by_file = {}
+            sub.all = frozenset(range(len(qm["tests"])))
+            return Analyzer(sub).analyze(text, files)
+
+        q, notes = reached(qm)
         if q is None:
             log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: all queries ({'; '.join(notes[-2:])})")
             continue
@@ -353,10 +363,17 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
             log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: no query reaches the change")
             drop.add(n)
             continue
+        # Queries the patch reaches only before Plan() (parse, optimize) are judged by
+        # their optimized tree; the others run in full. Unknown means full.
+        late = None
+        if "exec" in qm and all(f is not None for f in front_cpu[test_id]) and not NO_STAGED_TPC:
+            late, _ = reached(qm["exec"])
+        full = set(q) if late is None else set(late)
+        front = sorted(set(q) - full)
         # heaviest first: they run the most code, so a patch that changes any result
         # most likely changes theirs, and the check stops there
-        jobs[test_id] = sorted(q, key=lambda i: (-cpu[test_id][i], i))
-        est += sum(cpu[test_id][i] for i in q)
+        jobs[test_id] = {"front": front, "full": sorted(full, key=lambda i: (-cpu[test_id][i], i))}
+        est += sum(cpu[test_id][i] for i in full) + sum(front_cpu[test_id][i] for i in front)
     if jobs:
         rest = [x for x in chosen if x not in drop]
         gain = cost(rest, ms) - cost([x for x in rest if x not in {by_id[t] for t in jobs}], ms)
@@ -386,14 +403,21 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
                     overlay = None
                     break
             if overlay is not None:
-                env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SKIP_INTEGRATION="0")
+                # the hash seed the expected trees were recorded under
+                env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SKIP_INTEGRATION="0", PYTHONHASHSEED="0")
+                # A patch can make a query run for minutes. The check is cut off once it has
+                # cost about what dropping the tests would save; the tests then stay.
                 r = subprocess.run([sys.executable, str(HERE / "tpcmap.py"), "check", SRC, TPC_EXPECTED],
                                    input=pickle.dumps({"overlay": overlay, "jobs": jobs}),
-                                   capture_output=True, env=env, timeout=_time_left())
+                                   capture_output=True, env=env, timeout=min(_time_left(), max(2 * est + 3, 0.8 * gain / 1000)))
                 verdict = pickle.loads(r.stdout) if r.returncode == 0 else {}
+                stats = verdict.get("_stats", {})
                 for test_id, qs in jobs.items():
                     ok = verdict.get(test_id, False)
-                    log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: {len(qs)} queries reached, {'same results, dropped' if ok else 'kept'}")
+                    st = stats.get(test_id, {})
+                    log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: {len(qs['front']) + len(qs['full'])} queries reached "
+                             f"({len(qs['front'])} before planning only; {st.get('same_tree', 0)} same tree, {st.get('ran', 0)} run), "
+                             f"{'same results, dropped' if ok else 'kept'}")
                     if ok:
                         drop.add(by_id[test_id])
     return [x for x in chosen if x not in drop]
@@ -422,7 +446,7 @@ def main():
             except Exception as e:
                 log("key map failed to load, using attribute reads:", repr(e))
         analyzer = Analyzer(maps, import_diff=os.path.exists(IMPORT_STATE), keyreads=keyreads)
-        if os.path.exists(IMPORT_STATE) and os.path.exists(TOKREPLAY) and os.path.exists(TOKREPLAY_BASE):
+        if TOKREPLAY_ON and os.path.exists(IMPORT_STATE) and os.path.exists(TOKREPLAY) and os.path.exists(TOKREPLAY_BASE):
             tok = []  # loaded the first time a patch could use it
     except Exception as e:
         log("map failed to load, running everything:", repr(e))

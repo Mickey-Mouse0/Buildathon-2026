@@ -179,3 +179,21 @@ Checked in the scorer's image: samples unchanged, and on 8 stand-in sets 2 commi
 
 What it leans on: float sums that come out in a different order on another machine could still differ in their last bits. The unedited queries carry the same risk at the pinned commit.
 
+
+
+## Staged TPC check
+
+Each executed TPC query runs parse, optimize, plan, execute. Execution is about 80% of the cost (in the image: 10.8 s for all of TPC-DS, of which parse and optimize are 2.0 s), and most patches that reach a query only reach it before planning.
+
+- `blast/tpcmap.py map` now also records, per query, what is reached from the call to `Plan()` until the result is back (`"exec"` in `tpc_map.pkl.gz`). Module-level caches are emptied at that point while recording, so anything a later stage would take from a cache is recomputed and counted as reached there.
+- `expected` (image build) also stores a digest of each query's optimized tree (every slot of every node except the parent link and the cached hash), which tables `execute()` hands on, and the CPU up to that point.
+- In `check`, a query the patch never reaches from `Plan()` on is a "front" query. If its tree digest and tables match the pinned commit's, planning and execution get the same input and run code the patch doesn't touch, so they are skipped. If they differ, the query runs in full as before. The DuckDB transpile is always run and compared.
+- The selector's estimate uses the front CPU for those queries, so the cost gate passes far more often.
+
+The check is also cut off once it has run for `max(2 x estimate + 3 s, 0.8 x gain)`; the tests then stay. One planted patch (`leave_tables_isolated=False` in `execute()`) made a query run for minutes, which used the whole time budget and left every later commit without its checks. The import check is cut off at 20 s for the same reason.
+
+Factory rule: a function that runs at import and has a nested lambda was treated as a factory (only the tests that ran it). That misses a patch that makes it raise at import: every test file importing the module then fails to collect. Such patches now also go to the import diff.
+
+Checked in the image (native arm64; the map was re-recorded under amd64 and is identical): samples 101.4 s and the 30-commit set 117.0 s, 0 misses on both. On 200 planted commits, 0 misses against tests run on the patched code; on the 8 commits that keep or check a TPC test, total CPU went from 61.8 s to 40.2 s.
+
+Rebuild the map in the pinned image: `python blast/tpcmap.py map <sqlglot> blast/tpc_map.pkl.gz` (about 40 s).
