@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "blast" / "prover"))
 
-from prove import Prover, apply_hunks, load_profile_dir, split_patch  # noqa: E402
+from prove import Prover, apply_hunks, load_packaged, load_profile_dir, split_patch  # noqa: E402
 
 PYTHON = Path(os.environ.get("BENCH_PYTHON", sys.executable))
 RESULT = re.compile(r"^(PASSED|FAILED|ERROR|SUBFAILED|SUBPASSED)\S*\s+(\S+?)(?:\s|$)")
@@ -67,9 +67,10 @@ def main():
     p.add_argument("--bench", required=True)
     p.add_argument("--tests", required=True)
     p.add_argument("--sqlglot", required=True)
-    p.add_argument("--coverage", required=True)
-    p.add_argument("--profiles", required=True)
-    p.add_argument("--index", required=True)
+    p.add_argument("--coverage")
+    p.add_argument("--profiles")
+    p.add_argument("--index")
+    p.add_argument("--packaged", help="prover_data directory; replaces --coverage/--profiles/--index")
     p.add_argument("--jobs", type=int, default=6)
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--check-all", action="store_true")
@@ -77,8 +78,12 @@ def main():
     args = p.parse_args()
 
     tests = {t["number"]: t for t in json.loads(Path(args.tests).read_text())["tests"]}
-    coverage = json.loads(Path(args.coverage).read_text())
-    prover = Prover(args.sqlglot, tests, coverage, load_profile_dir(args.profiles), json.loads(Path(args.index).read_text()))
+    if args.packaged:
+        prover = load_packaged(args.packaged, args.sqlglot, list(tests.values()))
+        coverage = {"lines": prover.lines}
+    else:
+        coverage = json.loads(Path(args.coverage).read_text())
+        prover = Prover(args.sqlglot, tests, coverage, load_profile_dir(args.profiles), json.loads(Path(args.index).read_text()))
     bench = Path(args.bench).resolve()
     meta = json.loads((bench / "meta.json").read_text())
     sqlglot_dir = Path(args.sqlglot).resolve()

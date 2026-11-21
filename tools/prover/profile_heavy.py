@@ -9,13 +9,13 @@ from pathlib import Path
 TOOLS = Path(__file__).resolve().parent
 BUILD = Path(os.environ.get("PROVER_BUILD", TOOLS.parent.parent / "build"))
 RUNROOT = BUILD / "runroot"
-OUT = BUILD / "profiles"
+OUT = Path(os.environ.get("PROFILE_OUT", BUILD / "profiles"))
 PYTHON = Path(sys.executable)
 
 
 def run(test):
     out = OUT / f"{test['number']}.pkl"
-    env = dict(os.environ, SKIP_INTEGRATION="0", PYTHONPATH=str(TOOLS), VALUE_PROFILE_OUT=str(out))
+    env = dict(os.environ, PYTHONHASHSEED=os.environ.get("PROFILE_SEED", "0"), SKIP_INTEGRATION="0", PYTHONPATH=str(TOOLS), VALUE_PROFILE_OUT=str(out))
     env["PATH"] = f"{PYTHON.parent}:{env['PATH']}"
     start = time.time()
     result = subprocess.run(

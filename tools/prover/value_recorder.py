@@ -3,6 +3,7 @@ import concurrent.futures
 import os
 import pickle
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "blast" / "prover"))
@@ -14,32 +15,44 @@ CAP = 512
 _stack = []
 _records = {}
 _overflow = set()
+_raised = set()
+_MAIN = threading.main_thread().ident
 
 
 def __bpb__(number):
-    _stack.append((number, {}))
+    if threading.get_ident() != _MAIN:
+        _raised.add(number)
+        return
+    _stack.append((number, {}, {}))
 
 
 def __bpl__(number, position, value):
-    for frame_number, leaves in reversed(_stack):
+    if threading.get_ident() != _MAIN:
+        _raised.add(number)
+        return value
+    for frame_number, leaves, identities in reversed(_stack):
         if frame_number == number:
-            leaves[position] = value
+            leaves[position] = encode(value, identities)
             break
     return value
 
 
 def __bpe__(number, _, result):
+    if threading.get_ident() != _MAIN:
+        _raised.add(number)
+        return result
     while _stack:
-        frame_number, leaves = _stack.pop()
+        frame_number, leaves, identities = _stack.pop()
         if frame_number == number:
             break
+        _raised.add(frame_number)
     else:
+        _raised.add(number)
         return result
     if number in _overflow:
         return result
-    identities = {}
     size = max(leaves) + 1 if leaves else 0
-    encoded = tuple(encode(leaves[i], identities) if i in leaves else MISSING for i in range(size))
+    encoded = tuple(leaves.get(i, MISSING) for i in range(size))
     record = (encoded, encode(result, identities))
     seen = _records.setdefault(number, set())
     if record not in seen:
@@ -87,9 +100,10 @@ def pytest_collection_finish(session):
 
 def pytest_sessionfinish(session, exitstatus):
     out = os.environ["VALUE_PROFILE_OUT"]
+    _raised.update(frame[0] for frame in _stack)
     with open(out, "wb") as f:
         pickle.dump(
-            {"records": _records, "overflow": sorted(_overflow), "exitstatus": int(exitstatus)},
+            {"records": _records, "overflow": sorted(_overflow), "raised": sorted(_raised), "exitstatus": int(exitstatus)},
             f,
             protocol=pickle.HIGHEST_PROTOCOL,
         )

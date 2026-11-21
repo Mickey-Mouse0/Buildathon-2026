@@ -63,8 +63,25 @@ It only reasons about the 31 tests that take 0.3 s or more (87 of the 103 record
 
 The replay is conservative. Objects it cannot evaluate are kept opaque: only their truthiness, identity and whether `==` is plain identity are known. Anything needing more is "unknown", and the test stays. Examples it proves: `x is E.A` to `x == E.A` on an enum, `self._table is None` to `== None` on a class without `__eq__`, and an `and`/`or` swap that short-circuits the same way on every recorded input.
 
-**Checked on planted bugs.** `tools/prover/mutants.py` plants single mutations: and/or, comparison swaps, constants, removed `not`, deleted statements, comments, docstrings. `tools/prover/bench.py` then runs every heavy test the prover called safe on the mutated code. Results: 128 mutants, 1,361 test runs, 0 tests that failed after being called safe. On the 30 samples, it made no wrong claims either.
+**Checked on planted bugs.** `tools/prover/mutants.py` plants single mutations in sqlglot code: and/or, comparison swaps, constants, removed `not`, deleted statements, comments, docstrings. `tools/prover/data_mutants.py` plants edits in fixture files and in shared test files. `tools/prover/bench.py` then runs every heavy test the prover called safe on the changed code. `tools/prover/lemma_checks.py` holds 17 hand-made edge cases. Results are in "Hardening" below.
+
+**Hardening after the first submission.** The first submission missed one commit. The cause was in the file-read lemma: a file loaded in `setUpClass` (`tpc-ds.sql`, `tpc-h.sql`) was credited only to the first test of the class, so the executor tests were "proven" safe for TPC fixture edits. A review of every lemma then found and fixed:
+
+| Bug | Fix |
+| --- | --- |
+| Files read in class setup credited to one test | Each heavy test is re-run alone and every line and file it touches is merged into the map |
+| An edit to a test module that other test files import (`test_dialect.py`) was treated as affecting only that file | Any test file imported by another test file now affects every heavy test |
+| An evaluation that raised partway through was not recorded, so "never evaluated" could be wrong | Such expressions are marked and never proven |
+| Leaf values were encoded after the whole expression ran | Values are encoded when they are read |
+| Reordered operands around a side-effecting call were not caught | The full evaluation order must match when any call is involved |
+| Profiles came from one hash seed | Three seeds, merged |
+| An empty patch, or one without `diff --git`, counted as "changes nothing" | Unprovable |
+| Trees that differ with no located difference fell through to "docstring only" | Unprovable |
+| `# coding:` comments were treated as harmless | Unprovable |
+| Zero-context insertion hunks were applied one line early | Fixed |
+
+Before the fixes, 5 of the 17 lemma checks failed. All pass now. With the new profiles: 109 code mutants (1,319 test runs) and 30 fixture and test-file mutants (591 test runs), with 0 tests failing after being called safe. Samples are unchanged at 124.9 s with 0 misses.
 
 **Limits.** Profiles were recorded on macOS with Python 3.13, not inside the pinned image. A test that takes a different path in the scorer's environment could evaluate inputs we never recorded. The prover makes no claims about class-level constants (`WEEK_OFFSET = -2`). Real feature commits mostly add statements and fall back to the selector.
 
-To rebuild the prover's data, run these in `tools/prover/` in order: `build_line_map.py`, `instrument.py`, `profile_heavy.py`, `package_data.py`.
+To rebuild the prover's data or check it against planted bugs, see `tools/prover/README.md`. `tools/prover/rebuild.sh` runs the whole pipeline.

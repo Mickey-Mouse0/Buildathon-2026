@@ -146,6 +146,7 @@ class Evaluation:
         self.slots = leaf_slots
         self.record = record_leaves
         self.impure_trace = []
+        self.full_trace = []
         self.pure = {id(leaf): is_pure(leaf) for leaf in leaves_of(root)}
 
     def leaf(self, node):
@@ -155,6 +156,7 @@ class Evaluation:
             raise Unknown("leaf not evaluated in original run")
         if not self.pure[id(node)]:
             self.impure_trace.append(slot)
+        self.full_trace.append(slot)
         return value
 
     def run(self, node):
@@ -240,6 +242,8 @@ def prove_expression(old_root, new_root, condition, records):
             new_value = new_eval.run(new_root)
             if old_eval.impure_trace != new_eval.impure_trace:
                 return False, "side-effecting leaves evaluated differently"
+            if old_eval.impure_trace and old_eval.full_trace != new_eval.full_trace:
+                return False, "evaluation order changed around a side-effecting leaf"
             if not same(old_value, new_value, condition):
                 return False, "mutated expression changes a recorded value"
         except Unknown as error:

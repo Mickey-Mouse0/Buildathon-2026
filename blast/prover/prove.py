@@ -15,6 +15,7 @@ from targets import OPERATOR_NODES, find_targets, operator_children, target_key 
 
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 DOCSTRING_SENSITIVE = ("sqlglot/typing/",)
+CODING_COOKIE = re.compile(r"^[ \t\f]*#.*?coding[:=]")
 
 
 class Unprovable(Exception):
@@ -36,7 +37,8 @@ def split_patch(text):
             current["new"] = raw[4:].strip()
         elif HUNK.match(raw):
             m = HUNK.match(raw)
-            current["hunks"].append({"start": int(m.group(1)), "lines": []})
+            old_count = int(m.group(2)) if m.group(2) is not None else 1
+            current["hunks"].append({"start": int(m.group(1)), "old_count": old_count, "lines": []})
         elif current["hunks"] and raw[:1] in (" ", "-", "+"):
             current["hunks"][-1]["lines"].append(raw)
         elif current["hunks"] and raw.startswith("\\"):
@@ -49,7 +51,7 @@ def apply_hunks(old_text, hunks):
     out = []
     cursor = 0
     for hunk in hunks:
-        start = hunk["start"] - 1 if hunk["start"] > 0 else 0
+        start = hunk["start"] if hunk.get("old_count") == 0 else hunk["start"] - 1
         if start < cursor:
             raise Unprovable("overlapping hunks")
         out.extend(old_lines[cursor:start])
@@ -90,7 +92,7 @@ def find_diffs(old, new):
                 return
             for x, y in zip(a, b):
                 walk(x, y, chain)
-        elif a != b:
+        elif a != b or repr(a) != repr(b):
             diffs.append((chain[-1], chain))
 
     walk(old, new, [])
@@ -138,8 +140,14 @@ def is_docstring_change(owner, chain):
     )
 
 
+def coding_cookie(text):
+    return [line for line in text.splitlines()[:2] if CODING_COOKIE.match(line)]
+
+
 class FileChange:
     def __init__(self, path, old_text, new_text):
+        if coding_cookie(old_text) != coding_cookie(new_text):
+            raise Unprovable(f"{path}: source encoding declaration changed")
         self.path = path
         self.old_tree = ast.parse(old_text)
         try:
@@ -167,11 +175,30 @@ class Prover:
         lines = self.lines.get(path, {})
         return any(test in lines.get(str(n), ()) for n in range(start, end + 1))
 
+    def imported_by_other_tests(self, path):
+        module = path.removesuffix(".py").replace("/", ".")
+        stem = Path(path).stem
+        pattern = re.compile(rf"(\b{re.escape(module)}\b|from\s+\.+\s*import\s+.*\b{re.escape(stem)}\b|from\s+\.+{re.escape(stem)}\b|\b{re.escape(stem)}\b\s+import)")
+        for other in (self.sqlglot_dir / "tests").rglob("*.py"):
+            if other.relative_to(self.sqlglot_dir).as_posix() == path:
+                continue
+            try:
+                if pattern.search(other.read_text(errors="replace")):
+                    return True
+            except OSError:
+                return True
+        return False
+
     def analyze(self, patch_text):
         changes, notes = [], []
         affected_by_files = set()
-        for entry in split_patch(patch_text):
+        entries = split_patch(patch_text)
+        if not entries:
+            raise Unprovable("no file diffs found in the patch")
+        for entry in entries:
             old, new = entry["old"], entry["new"]
+            if not entry["hunks"]:
+                raise Unprovable("file diff without hunks")
             if old == "/dev/null" or new == "/dev/null" or old is None or new is None:
                 raise Unprovable("file added or removed")
             path = new.removeprefix("b/")
@@ -183,9 +210,9 @@ class Prover:
                 notes.append(f"{path}: fixture read by {len(readers)} tests")
                 continue
             if path.startswith("tests/"):
-                stem = Path(path).name
-                if stem.startswith("test_"):
+                if Path(path).name.startswith("test_") and not self.imported_by_other_tests(path):
                     affected_by_files |= {t for t in self.heavy if self.tests[t]["file"] == path}
+                    affected_by_files |= set(self.fixtures.get(path, ())) & set(self.heavy)
                 else:
                     affected_by_files |= set(self.heavy)
                 notes.append(f"{path}: test code")
@@ -209,6 +236,8 @@ class Prover:
                 notes.append(f"{change.path}: AST unchanged (comments/whitespace only)")
                 continue
             diffs = find_diffs(change.old_tree, change.new_tree)
+            if not diffs:
+                return {"noop": False, "safe": {}, "notes": notes + [f"unprovable: {change.path}: trees differ but no difference located"]}
             if change.path.startswith(DOCSTRING_SENSITIVE) or not all(is_docstring_change(o, c) for o, c in diffs):
                 noop = False
                 obligations.extend((change, owner, chain) for owner, chain in diffs)
@@ -258,6 +287,8 @@ class Prover:
                 return False, "expression was not instrumented"
             if number in profile["overflow"]:
                 return False, "too many distinct evaluations recorded"
+            if number in profile.get("raised", ()):
+                return False, "an evaluation raised or ran off the main thread"
             records = profile["records"].get(number)
             if records is None:
                 return True, "changed expression never evaluated"

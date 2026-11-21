@@ -85,6 +85,6 @@ def encode(value, identities):
     if isinstance(value, type) and _is_picklable_ref(value):
         return value
     ident = identities.setdefault(id(value), len(identities))
-    eq = getattr(kind, "__eq__", None)
-    eqmode = "identity" if eq is object.__eq__ else "custom"
+    default_eq = getattr(kind, "__eq__", None) is object.__eq__ and getattr(kind, "__ne__", None) is object.__ne__
+    eqmode = "identity" if default_eq else "custom"
     return Opaque(f"{kind.__module__}.{kind.__qualname__}", _truthiness(value), ident, eqmode, None)
