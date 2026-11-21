@@ -8,7 +8,8 @@ RUN python /app/tools/fetch_sqlglot.py /opt/sqlglot && chmod -R a+rX /opt/sqlglo
 
 COPY blast /app/blast
 RUN python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/profiles.pkl.xz'), open('/app/blast/prover_data/profiles.pkl', 'wb'))" \
-    && rm /app/blast/prover_data/profiles.pkl.xz \
+    && python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/union.pkl.xz'), open('/app/blast/prover_data/union.pkl', 'wb'))" \
+    && rm /app/blast/prover_data/profiles.pkl.xz /app/blast/prover_data/union.pkl.xz \
     && chmod -R a+rX /app \
     && python -c "import compileall; compileall.compile_dir('/app/blast', quiet=1)"
 

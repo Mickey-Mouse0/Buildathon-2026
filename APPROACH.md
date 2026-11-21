@@ -95,3 +95,7 @@ To rebuild the prover's data or check it against planted bugs, see `tools/prover
 - The cycle collector is off while the maps load: CPU on the samples went from 3.9 s to 1.3 s.
 
 Checked: samples 124.9 s, 0 misses. Planted-bug and real-commit checks are being re-labeled (the first labels missed SUBFAILED subtests).
+
+## All-tests replay
+
+The value-replay lemma now also runs over every test, not just the 31 heavy ones. Every one of the 1,620 tests was recorded under 3 hash seeds (`test_lazy_load` excepted, because it starts its own `python`), each in a fork of one post-import process. The records of all tests are merged per expression into `blast/prover_data/union.pkl.xz` (0.9 MB). The change must also be an operator expression, and replay must give the same value as before on every recorded evaluation from any test (or the expression was never evaluated). When both hold, the whole commit cannot change any profiled test, and only unprofiled tests stay selected. On the samples, `2haz` and `66ks` now cost 0: 124.9 s becomes 118.6 s with 0 misses, at about +0.5 s CPU. Every whole-commit claim on the planted bugs was checked by running every test that covers the changed file.

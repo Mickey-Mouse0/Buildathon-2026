@@ -131,8 +131,14 @@ def main():
             chosen = every
         if prover is not None and chosen:
             try:
-                verdict = prover.verdict(patch.read_text(errors="replace"))
-                if verdict["noop"]:
+                patch_text = patch.read_text(errors="replace")
+                all_safe, why = prover.union_verdict(patch_text)
+                verdict = None if all_safe else prover.verdict(patch_text)
+                if all_safe:
+                    kept = [n for n in chosen if n not in prover.union_profiled]
+                    log(cid, f"prover: every profiled test unaffected ({why}); keeping {len(kept)} unprofiled")
+                    chosen = kept
+                elif verdict["noop"]:
                     log(cid, "prover: commit changes nothing")
                     chosen = []
                 else:

@@ -1,10 +1,13 @@
 import builtins
 import concurrent.futures
+import hashlib
 import os
 import pickle
 import sys
 import threading
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "blast" / "prover"))
 
@@ -98,7 +101,50 @@ def pytest_collection_finish(session):
                 pass
 
 
+_failed_reports = set()
+_FORK_DIR = os.environ.get("VALUE_PROFILE_FORK_DIR")
+_SKIP = set()
+if os.environ.get("VALUE_PROFILE_SKIP"):
+    with open(os.environ["VALUE_PROFILE_SKIP"]) as f:
+        _SKIP = set(f.read().split("\n")) - {""}
+
+
+def pytest_runtest_logreport(report):
+    if report.failed:
+        _failed_reports.add(report.nodeid)
+
+
+# Each test runs in a fork of the post-import parent, so class setup runs inside
+# every test and no test sees state or warm caches left by another.
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_protocol(item, nextitem):
+    if not _FORK_DIR:
+        return None
+    if item.nodeid in _SKIP:
+        return True
+    pid = os.fork()
+    if pid == 0:
+        try:
+            from _pytest.runner import runtestprotocol
+
+            runtestprotocol(item, nextitem=None, log=True)
+            _raised.update(frame[0] for frame in _stack)
+            name = hashlib.sha1(item.nodeid.encode()).hexdigest()
+            with open(os.path.join(_FORK_DIR, f"{name}.pkl"), "wb") as f:
+                pickle.dump(
+                    {"test": item.nodeid, "records": _records, "overflow": sorted(_overflow),
+                     "raised": sorted(_raised), "exitstatus": 1 if _failed_reports else 0},
+                    f, protocol=pickle.HIGHEST_PROTOCOL,
+                )
+        finally:
+            os._exit(0)
+    os.waitpid(pid, 0)
+    return True
+
+
 def pytest_sessionfinish(session, exitstatus):
+    if _FORK_DIR:
+        return
     out = os.environ["VALUE_PROFILE_OUT"]
     _raised.update(frame[0] for frame in _stack)
     with open(out, "wb") as f:

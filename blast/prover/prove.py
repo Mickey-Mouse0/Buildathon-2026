@@ -170,6 +170,13 @@ class Prover:
         self.number_of_key = {key: int(number) for number, key in target_index.items()}
         self.profiles = {n: p for n, p in profiles.items() if p["exitstatus"] == 0 and n in tests}
         self.heavy = sorted(self.profiles)
+        self.union = None
+        self.union_profiled = set()
+        self._union_cache = {}
+
+    def attach_union(self, payload, number_of_id):
+        self.union = payload
+        self.union_profiled = {number_of_id[i] for i in payload["profiled"] if i in number_of_id}
 
     def covers(self, test, path, start, end):
         lines = self.lines.get(path, {})
@@ -261,23 +268,67 @@ class Prover:
                 safe[test] = "; ".join(sorted(set(reasons))) or "no obligations"
         return {"noop": False, "safe": safe, "notes": notes}
 
-    def discharge(self, test, change, owner, chain):
-        profile = self.profiles[test]
-        root, steps_ok = None, False
+    @staticmethod
+    def replay_root(change, chain):
         for i in range(len(chain) - 1, -1, -1):
             node = chain[i]
             if id(node) in change.root_ids:
-                below = chain[i + 1 :]
                 parent = node
-                steps_ok = True
-                for child in below:
+                for child in chain[i + 1 :]:
                     if not (isinstance(parent, OPERATOR_NODES) and any(child is c for c in operator_children(parent))):
-                        steps_ok = False
-                        break
+                        return None
                     parent = child
-                if steps_ok:
-                    root = node
-                break
+                return node
+        return None
+
+    def union_verdict(self, patch_text):
+        if self.union is None:
+            return False, "no all-test profiles"
+        try:
+            changes, affected, notes = self.analyze(patch_text)
+        except Unprovable as error:
+            return False, f"unprovable: {error}"
+        if affected or any(n.startswith("tests/") for n in notes):
+            return False, "touches test files or fixtures"
+        reasons = []
+        for change in changes:
+            if ast_equal(change.old_tree, change.new_tree):
+                continue
+            diffs = find_diffs(change.old_tree, change.new_tree)
+            if not diffs:
+                return False, "trees differ but no difference located"
+            if not change.path.startswith(DOCSTRING_SENSITIVE) and all(is_docstring_change(o, c) for o, c in diffs):
+                continue
+            data = self.union_file(change.path)
+            for owner, chain in diffs:
+                root = self.replay_root(change, chain)
+                if root is None:
+                    return False, "change is not inside a replayable expression"
+                number = self.number_of_key.get(target_key(change.path, root))
+                if number is None:
+                    return False, "expression was not instrumented"
+                if number in data["flagged"]:
+                    return False, "expression raised, overflowed or ran off the main thread in some test"
+                records = data["records"].get(number)
+                if records is None:
+                    reasons.append("never evaluated by any test")
+                    continue
+                new_root = counterpart(root, change.old_tree, change.new_tree)
+                ok, why = prove_expression(root, new_root, id(root) in change.conditions, records)
+                if not ok:
+                    return False, why
+                reasons.append(why)
+        return True, "; ".join(reasons) or "no effective change"
+
+    def union_file(self, path):
+        if path not in self._union_cache:
+            raw = self.union["files"].get(path)
+            self._union_cache[path] = pickle.loads(raw) if raw is not None else {"records": {}, "flagged": []}
+        return self._union_cache[path]
+
+    def discharge(self, test, change, owner, chain):
+        profile = self.profiles[test]
+        root = self.replay_root(change, chain)
 
         statement = next((n for n in reversed(chain) if isinstance(n, ast.stmt)), None)
 
@@ -347,7 +398,12 @@ def load_packaged(data_dir, sqlglot_dir, tests_list):
     profiles = {number_of_id[i]: p for i, p in by_id.items() if i in number_of_id}
     with gzip.open(data_dir / "target_index.json.gz", "rt") as f:
         index = json.load(f)
-    return Prover(sqlglot_dir, by_number, coverage, profiles, index)
+    prover = Prover(sqlglot_dir, by_number, coverage, profiles, index)
+    union_path = data_dir / "union.pkl"
+    if union_path.exists():
+        with open(union_path, "rb") as f:
+            prover.attach_union(pickle.load(f), number_of_id)
+    return prover
 
 
 def load_prover(args):

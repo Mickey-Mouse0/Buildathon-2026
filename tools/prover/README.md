@@ -21,8 +21,9 @@ Optional settings: `BUILD=...` (work folder), `SEEDS="0 1 2"` (hash seeds to rec
 | 3 | `instrument.py` | A copy of sqlglot where every condition and operator expression reports its inputs and result. Also `target_index.json`. |
 | 4 | `profile_heavy.py` + `value_recorder.py` | Runs each test of 0.3 s or more alone under the instrumented copy, once per seed. Writes one pickle per test. |
 | 5 | `package_data.py` | Merges the seeds and keys everything by test id. Writes `blast/prover_data/`. |
-| 6 | `isolated_maps.py` | Re-runs each heavy test alone with coverage and file tracking, and merges what it touches into the map. This catches reads in `setUpClass` and code that a shared run skips because of warm caches. |
-| 7 | `lemma_checks.py` | Hand-written edge cases (see below). It must print `0 failing checks`. |
+| 6 | `profile_all.py` + `package_union.py` | Records every other test the same way. Each test runs in a fork of one post-import process, so no test sees another's state. The records of all tests are merged per expression into `union.pkl.xz`. |
+| 7 | `isolated_maps.py` | Re-runs each heavy test alone with coverage and file tracking, and merges what it touches into the map. This catches reads in `setUpClass` and code that a shared run skips because of warm caches. |
+| 8 | `lemma_checks.py` | Hand-written edge cases (see below). It must print `0 failing checks`. |
 
 ## Check the prover
 
@@ -31,6 +32,8 @@ Optional settings: `BUILD=...` (work folder), `SEEDS="0 1 2"` (hash seeds to rec
 build/venv/bin/python tools/prover/lemma_checks.py build/sqlglot
 ```
 These are 17 hand-made patches with a known right answer: comment-only edits, patches without a header, coding cookies, TPC fixture edits, edits to `test_dialect.py` (which other test files import), added files, syntax errors, and zero-context hunks. Add a case here whenever you find a new kind of bug.
+
+**Whole-commit claims**: `bench.py ... --union --coverage build/map.json` runs every test covering the changed file for each patch the all-tests replay calls a no-op.
 
 **Mutant benches** plant a small bug, ask the prover which heavy tests it can skip, then actually run those tests on the changed code. A test that fails after the prover called it safe would have cost 300 s on the board. The bench prints these as `VIOLATION`.
 

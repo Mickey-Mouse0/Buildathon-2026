@@ -75,12 +75,13 @@ def main():
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--check-all", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--union", action="store_true", help="check whole-commit claims of the all-tests replay")
     args = p.parse_args()
 
     tests = {t["number"]: t for t in json.loads(Path(args.tests).read_text())["tests"]}
     if args.packaged:
         prover = load_packaged(args.packaged, args.sqlglot, list(tests.values()))
-        coverage = {"lines": prover.lines}
+        coverage = json.loads(Path(args.coverage).read_text()) if args.coverage else {"lines": prover.lines}
     else:
         coverage = json.loads(Path(args.coverage).read_text())
         prover = Prover(args.sqlglot, tests, coverage, load_profile_dir(args.profiles), json.loads(Path(args.index).read_text()))
@@ -92,10 +93,18 @@ def main():
     for mid, info in sorted(meta.items()):
         patch = (bench / "commits" / f"{mid}.patch").read_text()
         verdict = prover.verdict(patch)
+        if args.union:
+            proven, why = prover.union_verdict(patch)
+            verdict = {"noop": False, "safe": {}, "notes": [why]}
+            if proven:
+                verdict = {"noop": True, "safe": {t: why for t in prover.union_profiled}, "notes": [why]}
         touching = set()
         for changed in info.get("files", [info["file"]]):
             touching |= {t for ts in coverage["lines"].get(changed, {}).values() for t in ts}
-        to_check = sorted(t for t in verdict["safe"] if t in touching or verdict["noop"] or args.check_all)
+        if args.union:
+            to_check = sorted(t for t in verdict["safe"] if t in touching) if verdict["noop"] else []
+        else:
+            to_check = sorted(t for t in verdict["safe"] if t in touching or verdict["noop"] or args.check_all)
         jobs.append((mid, info, patch, verdict, to_check))
 
     def work(job):
