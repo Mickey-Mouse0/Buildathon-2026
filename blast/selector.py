@@ -382,10 +382,17 @@ def main():
     for patch in sorted((DATA / "commits").glob("*.patch")):
         cid = patch.stem
         chosen = every
+        # read before the analyzer's try: if it fails, the TPC check below must not
+        # see the previous commit's patch
+        text = patch.read_text(errors="replace")
         try:
+            files = patchutil.parse(text)
+        except Exception:
+            files = None
+        try:
+            if files is None:
+                raise ValueError("patch does not parse")
             if analyzer is not None:
-                text = patch.read_text(errors="replace")
-                files = patchutil.parse(text)
                 idx, notes = analyzer.analyze(text, files)
                 d = analyzer.deferred
                 if idx is not None and d is not None:
@@ -439,7 +446,7 @@ def main():
                     log(cid, "; ".join(tnotes))
             except Exception as e:
                 log(cid, "tokenizer replay error, keeping the tests:", repr(e))
-        if analyzer is not None and chosen:
+        if analyzer is not None and chosen and files is not None:
             try:
                 chosen = tpc_check(cid, analyzer, files, text, chosen, ms, by_id)
             except Exception as e:
