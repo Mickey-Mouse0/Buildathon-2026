@@ -144,18 +144,51 @@ def coding_cookie(text):
     return [line for line in text.splitlines()[:2] if CODING_COOKIE.match(line)]
 
 
+_pinned = {}
+
+
+def pinned_side(path, old_text):
+    """The pinned file's tree, the same for every patch to that file. Nothing writes
+    to it, so it is parsed once per run, and so are the targets found in it."""
+    hit = _pinned.get(path)
+    if hit is None or hit[0] != old_text:
+        hit = _pinned[path] = (old_text, ast.parse(old_text), {})
+    return hit[1], hit[2]
+
+
 class FileChange:
     def __init__(self, path, old_text, new_text):
         if coding_cookie(old_text) != coding_cookie(new_text):
             raise Unprovable(f"{path}: source encoding declaration changed")
         self.path = path
-        self.old_tree = ast.parse(old_text)
+        self.old_tree, self._targets = pinned_side(path, old_text)
         try:
             self.new_tree = ast.parse(new_text)
         except SyntaxError as error:
             raise Unprovable(f"{path}: patched file does not parse ({error.msg})")
-        self.roots, self.conditions = find_targets(self.old_tree)
-        self.root_ids = {id(r) for r in self.roots}
+        self._equal = self._diffs = None
+
+    def targets(self, chain):
+        """(ids of replayable roots, ids of conditions) for the expressions under the
+        innermost statement of chain. Whether an expression is a root depends only on
+        its parent and on the annotations of the def or annotated assignment it sits
+        in, all inside that statement, so the whole file need not be walked."""
+        scope = next((n for n in reversed(chain) if isinstance(n, ast.stmt)), self.old_tree)
+        hit = self._targets.get(id(scope))
+        if hit is None:
+            roots, conditions = find_targets(scope)
+            hit = self._targets[id(scope)] = ({id(r) for r in roots}, conditions)
+        return hit
+
+    def equal(self):
+        if self._equal is None:
+            self._equal = ast_equal(self.old_tree, self.new_tree)
+        return self._equal
+
+    def diffs(self):
+        if self._diffs is None:
+            self._diffs = find_diffs(self.old_tree, self.new_tree)
+        return self._diffs
 
 
 class Prover:
@@ -173,6 +206,7 @@ class Prover:
         self.union = None
         self.union_profiled = set()
         self._union_cache = {}
+        self._analyzed = None
 
     def attach_union(self, payload, number_of_id):
         self.union = payload
@@ -197,6 +231,19 @@ class Prover:
         return False
 
     def analyze(self, patch_text):
+        # union_verdict and verdict both ask about the same patch
+        if self._analyzed is None or self._analyzed[0] != patch_text:
+            try:
+                self._analyzed = (patch_text, self._analyze(patch_text), None)
+            except Unprovable as error:
+                self._analyzed = (patch_text, None, error)
+        _, result, error = self._analyzed
+        if error is not None:
+            raise error
+        changes, affected, notes = result
+        return changes, set(affected), list(notes)
+
+    def _analyze(self, patch_text):
         changes, notes = [], []
         affected_by_files = set()
         entries = split_patch(patch_text)
@@ -239,10 +286,10 @@ class Prover:
         obligations = []
         noop = not affected and not any(n.startswith("tests/") for n in notes)
         for change in changes:
-            if ast_equal(change.old_tree, change.new_tree):
+            if change.equal():
                 notes.append(f"{change.path}: AST unchanged (comments/whitespace only)")
                 continue
-            diffs = find_diffs(change.old_tree, change.new_tree)
+            diffs = change.diffs()
             if not diffs:
                 return {"noop": False, "safe": {}, "notes": notes + [f"unprovable: {change.path}: trees differ but no difference located"]}
             if change.path.startswith(DOCSTRING_SENSITIVE) or not all(is_docstring_change(o, c) for o, c in diffs):
@@ -270,9 +317,10 @@ class Prover:
 
     @staticmethod
     def replay_root(change, chain):
+        root_ids = change.targets(chain)[0]
         for i in range(len(chain) - 1, -1, -1):
             node = chain[i]
-            if id(node) in change.root_ids:
+            if id(node) in root_ids:
                 parent = node
                 for child in chain[i + 1 :]:
                     if not (isinstance(parent, OPERATOR_NODES) and any(child is c for c in operator_children(parent))):
@@ -292,9 +340,9 @@ class Prover:
             return False, "touches test files or fixtures"
         reasons = []
         for change in changes:
-            if ast_equal(change.old_tree, change.new_tree):
+            if change.equal():
                 continue
-            diffs = find_diffs(change.old_tree, change.new_tree)
+            diffs = change.diffs()
             if not diffs:
                 return False, "trees differ but no difference located"
             if not change.path.startswith(DOCSTRING_SENSITIVE) and all(is_docstring_change(o, c) for o, c in diffs):
@@ -314,7 +362,7 @@ class Prover:
                     reasons.append("never evaluated by any test")
                     continue
                 new_root = counterpart(root, change.old_tree, change.new_tree)
-                ok, why = prove_expression(root, new_root, id(root) in change.conditions, records)
+                ok, why = prove_expression(root, new_root, id(root) in change.targets(chain)[1], records)
                 if not ok:
                     return False, why
                 reasons.append(why)
@@ -348,7 +396,7 @@ class Prover:
             if records is None:
                 return True, "changed expression never evaluated"
             new_root = counterpart(root, change.old_tree, change.new_tree)
-            ok, why = prove_expression(root, new_root, id(root) in change.conditions, records)
+            ok, why = prove_expression(root, new_root, id(root) in change.targets(chain)[1], records)
             return ok, why
 
         if statement is not None and self._function_body(chain, statement):
