@@ -23,6 +23,11 @@ SRC = os.environ.get("BLAST_SQLGLOT", "/opt/sqlglot")
 MAP = os.environ.get("BLAST_MAP", str(HERE / "covmap.pkl.gz"))
 PROVER_DATA = Path(os.environ.get("BLAST_PROVER_DATA", str(HERE / "prover_data")))
 IMPORT_STATE = os.environ.get("BLAST_IMPORT_STATE", str(HERE / "importstate.pkl"))
+KEYMAP = os.environ.get("BLAST_KEYMAP", str(HERE / "keymap.pkl.gz"))
+TOKREPLAY = os.environ.get("BLAST_TOKREPLAY", str(HERE / "tokreplay.pkl.xz"))
+TOKREPLAY_BASE = os.environ.get("BLAST_TOKREPLAY_BASE", str(HERE / "tokreplay_base.pkl"))
+# Replay only when the tests it could drop are worth this many times its CPU.
+REPLAY_MARGIN = float(os.environ.get("BLAST_REPLAY_MARGIN", "1.5"))
 # Only pay for an import diff (~1 s of CPU) when its fallback would cost more than this.
 DIFF_MIN_GAIN_MS = int(os.environ.get("BLAST_DIFF_MIN_GAIN_MS", "1200"))
 WORKER_MS = 2000
@@ -99,21 +104,20 @@ def cost(numbers, ms):
 
 
 _baseline = []
+_tests = []
+_last_import = []
 
 
-def import_diff(analyzer, files, notes):
-    """Map test indexes for what the patch changes in sqlglot's state after import,
-    or None if that can't be worked out."""
-    if not _baseline:
-        with open(IMPORT_STATE, "rb") as f:
-            _baseline.append(pickle.load(f))
+def _overlay(files, notes=None):
+    """{path: patched source} for the patch's sqlglot .py files, or None."""
     overlay = {}
     for fc in files:
         p = fc.path
         if not (p.startswith("sqlglot/") and p.endswith(".py")):
             continue
         if fc.new_path is None:
-            notes.append(f"import diff: {p} deleted")
+            if notes is not None:
+                notes.append(f"import diff: {p} deleted")
             return None
         old = ""
         if fc.old_path is not None:
@@ -123,14 +127,116 @@ def import_diff(analyzer, files, notes):
         if new is None:
             return None
         overlay[fc.new_path] = new
+    return overlay
+
+
+def patched_import(files, notes, replay=None, budget=None, **replay_opts):
+    """importstate.py's view of the patched sqlglot (and tokenizer replays), or None."""
+    if not _baseline:
+        with open(IMPORT_STATE, "rb") as f:
+            _baseline.append(pickle.load(f))
+    overlay = _overlay(files, notes)
+    if overlay is None:
+        return None
     # the same hash seed as the build-time snapshot, so sets of strings line up
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONHASHSEED="0")
+    # the child fingerprints dict settings key by key only where they differ from these
+    want = {k: _baseline[0]["snap"][k][0] for k in _baseline[0].get("dicts", ())}
+    payload = {"files": overlay, "dicts": want, "replay": replay, "budget": budget, **replay_opts}
     r = subprocess.run([sys.executable, str(HERE / "importstate.py"), "patched", SRC],
-                       input=pickle.dumps(overlay), capture_output=True, env=env, timeout=60)
+                       input=pickle.dumps(payload), capture_output=True, env=env, timeout=150)
     if r.returncode != 0:
         notes.append(f"import diff failed: {r.stderr.decode(errors='replace')[-200:]}")
         return None
-    return analyzer.diff_tests(_baseline[0], pickle.loads(r.stdout), notes)
+    after = pickle.loads(r.stdout)
+    _last_import[:] = [overlay, after]
+    return after
+
+
+def setting_changes(tok, maps, after, notes):
+    """Settings the patch changes at import, and the tests that read them outside the
+    tokenizer; None if anything else changes or a setting was never watched."""
+    import tokreplay
+
+    changed = tokreplay.changed_entries(_baseline[0], after)
+    if changed is None:
+        return None
+    attrs = []
+    for k in changed:
+        b, a = _baseline[0]["snap"].get(k), after["snap"].get(k)
+        if k[0] != "a" or b is None or a is None or b[1] != "plain" or a[1] != "plain":
+            notes.append(f"replay: {k} changed at import")
+            return None
+        attrs.append(f"{k[1]}.{k[2]}")
+        # subclasses that set it themselves (inherited reads are recorded on k[1])
+        attrs += [f"{sc}.{k[2]}" for sc in maps.subclasses.get(k[1], ()) if ("a", sc, k[2]) in _baseline[0]["snap"]]
+    if any(a in tok.collect for a in attrs):
+        return None
+    outside = tok.outside_readers(attrs)
+    if outside is None:
+        notes.append("replay: a changed setting was never watched")
+    return outside
+
+
+def import_diff(analyzer, files, notes):
+    """Map test indexes for what the patch changes in sqlglot's state after import,
+    or None if that can't be worked out."""
+    after = patched_import(files, notes)
+    return None if after is None else analyzer.diff_tests(_baseline[0], after, notes)
+
+
+def tokenizer_replay(tok, maps, files, chosen, ms, notes):
+    """chosen, minus tests whose every tokenizer call gives the same result with the
+    patch, when the patch only changes code or settings used inside the tokenizer."""
+    import tokreplay
+
+    spots = tokreplay.changed_spots(files, SRC)
+    if spots is None or not (spots[0] or spots[1]):
+        return chosen
+    if not tok:
+        tok.append(tokreplay.TokReplay(TOKREPLAY, TOKREPLAY_BASE, {t["id"]: t["number"] for t in _tests[0]}))
+    tok = tok[0]
+    body, elsewhere = spots
+    if tok.collect_calls is None or not tok.inside_only(body):
+        return chosen
+    need, keep = tok.needed(chosen)
+    if elsewhere and _last_import and _last_import[0] == _overlay(files):
+        # the import diff already ran on this patch: settle the settings part first
+        outside = setting_changes(tok, maps, _last_import[1], notes)
+        if outside is None:
+            return chosen
+        keep = keep | (outside & set(chosen))
+    saving = cost(chosen, ms) - cost(keep, ms)
+    est = tok.cost_ms(need) + 600
+    if saving < REPLAY_MARGIN * est:
+        notes.append(f"replay skipped: saves at most {saving / 1000:.1f}s for ~{est / 1000:.1f}s CPU")
+        return chosen
+    # a deterministic shuffle, so the probe at the front samples every kind of call
+    need = sorted(need, key=lambda i: (i * 2654435761) % 4294967291)
+    order = list(tok.collect_calls) + need
+    after = patched_import(files, notes, replay=[tok.inputs[i] for i in order], budget=max(1.0, 2 * est / 1000),
+                           replay_base=[tok.base[i] for i in order], probe=min(len(order), max(50, len(order) // 10)),
+                           probe_max=0.2)
+    if after is None:
+        return chosen
+    outside = setting_changes(tok, maps, after, notes)
+    if outside is None:
+        return chosen
+    digests = after["replay"]
+    ncol = len(tok.collect_calls)
+    for j, i in enumerate(tok.collect_calls):
+        if digests[j] is None or digests[j] != tok.base[i]:
+            notes.append("replay: a call made while test modules load differs")
+            return chosen
+    done = {i: d for i, d in zip(need, digests[ncol:])}
+    if need and all(d is None for d in digests[ncol:]):
+        notes.append("replay: stopped early, the patch changes tokenizing broadly")
+        return chosen
+    affected = tok.affected(chosen, done)
+    kept = [n for n in chosen if n in keep or n in outside or n in affected]
+    notes.append(f"replay: {len(need)} calls, {len(affected)} tests differ, {len(outside & set(chosen))} read a changed "
+                 f"setting outside, kept {len(kept)} of {len(chosen)}")
+    return kept
 
 
 def main():
@@ -139,13 +245,25 @@ def main():
     gc.disable()
     t0 = time.process_time()
     tests = json.loads((DATA / "tests.json").read_text())["tests"]
+    _tests.append(tests)
     ms = {t["number"]: int(t["seconds"] * 1000 + 0.5) for t in tests}
     by_id = {t["id"]: t["number"] for t in tests}
     every = sorted(ms)
+    tok = None
     try:
         maps = Maps(MAP, SRC)
         to_number = [by_id.get(t) for t in maps.tests]
-        analyzer = Analyzer(maps, import_diff=os.path.exists(IMPORT_STATE))
+        keyreads = None
+        if os.path.exists(IMPORT_STATE) and os.path.exists(KEYMAP):
+            try:
+                from keyreads import KeyReads
+
+                keyreads = KeyReads(KEYMAP, {t: i for i, t in enumerate(maps.tests)})
+            except Exception as e:
+                log("key map failed to load, using attribute reads:", repr(e))
+        analyzer = Analyzer(maps, import_diff=os.path.exists(IMPORT_STATE), keyreads=keyreads)
+        if os.path.exists(IMPORT_STATE) and os.path.exists(TOKREPLAY) and os.path.exists(TOKREPLAY_BASE):
+            tok = []  # loaded the first time a patch could use it
     except Exception as e:
         log("map failed to load, running everything:", repr(e))
         analyzer = None
@@ -213,6 +331,14 @@ def main():
                         log(cid, "prover dropped", dropped)
             except Exception as e:
                 log(cid, "prover error, keeping the selector's tests:", repr(e))
+        if tok is not None and chosen:
+            try:
+                tnotes = []
+                chosen = tokenizer_replay(tok, maps, patchutil.parse(patch.read_text(errors="replace")), chosen, ms, tnotes)
+                if tnotes:
+                    log(cid, "; ".join(tnotes))
+            except Exception as e:
+                log(cid, "tokenizer replay error, keeping the tests:", repr(e))
         workers = pack(chosen, ms)
         if workers:
             total += max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)

@@ -117,3 +117,39 @@ Each diff costs about 0.6 s of CPU, so it runs only when its fallback would cost
 The recorder also had a gap: it switched on its import bucket only after `import sqlglot`, so function bodies run during that import were recorded nowhere. It is fixed, and `tools/import_lines.py` added the missing 176 lines to the shipped map.
 
 Checked (corrected labels, 0 misses everywhere): samples 118.6 → 115.0 s, planted bugs 334.2 → 244.5 s, real commits 565.0 → 509.1 s.
+
+## Key-level reads of dict settings
+
+Most class settings are dicts (`Parser.FUNCTIONS`, `Tokenizer.KEYWORDS`, `NUMERIC_ESCAPES`, ...). The attribute map says a test read the dict, which is true of nearly every test that builds a parser or tokenizer of that class, even though most of them never look at the entry a patch changes. `4d63` (one value in Snowflake's `NUMERIC_ESCAPES`) selected 273 tests; none of them looks up that key.
+
+`tools/keymap_plugin.py` swaps every class-level dict (1,759 of them) for an equal dict that records, per test, every key looked up through it, misses included. Iteration, `len` and `bool` count as reading the key list; `items`, `values`, `==`, copies, `|`, pickling and `deepcopy` count as reading everything. `{**d}`, `dict(d)` and `**d` read each key one by one, so they are recorded per key. The import diff now fingerprints each dict key by key (`importstate.dict_info`), so a patch to a dict setting, or to anything derived from one at import, selects only the tests that read a changed key, the key list when the order changes, or everything.
+
+Why reading other keys is safe: a test's run can only differ from the pinned commit's at a read that returns something different. Until then it is the same run, so it reads exactly the keys we recorded, including keys computed from other entries (`D[D["a"]]` records `"a"`). What that argument needs, and how it is covered:
+
+| Way dict state could reach a test unseen | Covered by |
+|---|---|
+| A lookup that missed now hits | Misses are recorded |
+| A warm cache filled by an earlier test | Each test runs in a fork of the post-import parent |
+| Another reference to the same dict | Dicts referenced from anywhere but their own classes (20) are not wrapped and keep attribute-level reads; a change in which settings share one dict counts as a change |
+| `True == 1 == 1.0`, enum and class keys | Keys are matched by Python equality (`importstate.norm_key`); keys we can't reason about match everything |
+| Seed-dependent lookup order | Recorded under hash seeds 0, 1 and 2 and merged |
+| Reads in another process | A test that starts one (`test_lazy_load`) is left unrecorded and keeps attribute-level reads |
+| Reads while test modules import | If they touch a changed key, nothing is narrowed |
+| A test that fails under the recorder | Left unrecorded |
+
+Every edited class setting now goes to the import diff when it is available. Before, a one-line replacement also counted the untouched setting on the next line (the `+` side looked like an insertion in front of it), and `4d63` kept `DROP_UNKNOWN_ESCAPES`'s 273 readers. Settings whose values can't be fingerprinted keep their readers as before.
+
+Checked: `tools/keymap_checks.py` (24 toy tests reaching a dict in different ways, 12 kinds of edit, 0 misses); `tools/keymap_bench.py` (80 planted edits to real dict settings, 16,228 dropped tests run on the patched code, 0 failures; selection over those edits 32,344 → 17,431 tests). Samples 115.0 → 103.9 s, 0 misses. Rebuild: `python tools/build_keymap.py <sqlglot> sample/tests.json blast/keymap.pkl.gz` (about 12 minutes on 12 cores).
+
+## Tokenizer replay
+
+A patch to tokenizer code (`tokenizer_core.py` holds most of it) is seen by almost every test, so it used to select almost everything. But the tokenizer is a clean boundary: tokenizing resets all per-call state, so each call is a function of the tokenizer class, the dialect's fields and the SQL. If every call a test makes gives the same tokens, error, tokenizer state, log records and warnings with the patched code, the test runs exactly as before.
+
+`tools/tokreplay_plugin.py` records, per test (3 seeds, one fork per test):
+- every tokenize call as (tokenizer class, dialect fields, sql). Right after each call it tokenizes again with a fresh tokenizer built from that description; if the result differs, the test is marked not replayable (8 Athena tests are);
+- which function code ever starts outside a tokenizer call, as line ranges. In the tokenizer files that is only `Token`'s helpers and the `tokens` property, so a patch to any other line there only ever runs inside;
+- every class setting read outside a tokenizer call.
+
+At selection time (`blast/tokreplay.py`, `tokenizer_replay` in the selector), a patch qualifies when every changed function-body line only ever runs inside the tokenizer, and the import diff shows nothing changed but plain settings. The import-time runs of the tokenizer (sqlglot parses SQL while it imports) are covered by that clean diff. The patched sqlglot is imported in the import-diff child, which replays the calls of the selected tests and compares them with digests made from the pinned commit at image build time. Kept: tests whose calls differ, tests that read a changed setting outside the tokenizer, and tests without a usable recording.
+
+All 24,768 distinct calls replay in about 16 s of CPU, so replay runs only when the tests it could drop are worth 1.5 times its estimated CPU. It replays a shuffled 10% first and stops if more than 20% of those differ, since such a patch changes tokenizing broadly. Rebuild: `python tools/build_tokreplay.py <sqlglot> sample/tests.json blast/tokreplay.pkl.xz` (about 25 minutes).

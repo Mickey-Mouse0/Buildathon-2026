@@ -4,3 +4,4 @@ build/
 blast/prover_data/profiles.pkl
 blast/prover_data/union.pkl
 blast/importstate.pkl
+blast/tokreplay_base.pkl

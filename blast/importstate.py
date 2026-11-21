@@ -191,6 +191,95 @@ def import_all():
     return sorted(set(fail))
 
 
+UNKNOWN = ("?",)
+KEYSET = ("K",)
+ALL = ("A",)
+
+
+def norm_key(k):
+    """A token for a dict key such that keys a dict lookup treats as equal get equal
+    tokens (True, 1 and 1.0 all become ("n", 1)). Keys we can't reason about become
+    UNKNOWN, which matches every other token."""
+    t = type(k)
+    if t is str:
+        return ("s", k)
+    if k is None:
+        return ("0",)
+    if t is int or t is bool:
+        return ("n", int(k))
+    if t is float:
+        if k != k or k in (float("inf"), float("-inf")):
+            return UNKNOWN
+        return ("n", int(k)) if k.is_integer() else ("f", repr(k))
+    if t is bytes:
+        return ("b", k)
+    if t is tuple or t is frozenset:
+        parts = [norm_key(x) for x in k]
+        if UNKNOWN in parts:
+            return UNKNOWN
+        return ("t", *parts) if t is tuple else ("fs", *sorted(parts))
+    if isinstance(k, enum.Enum):
+        if isinstance(k, (str, int)):
+            return norm_key(k._value_)
+        if t.__eq__ is not object.__eq__:
+            return UNKNOWN
+        return ("e", t.__module__, t.__qualname__, k._name_)
+    if isinstance(k, type):
+        if type(k).__eq__ is not type.__eq__ or type(k).__hash__ is not type.__hash__:
+            return UNKNOWN
+        return ("c", k.__module__, k.__qualname__)
+    if isinstance(k, str) and t.__eq__ is str.__eq__ and t.__hash__ is str.__hash__:
+        return ("s", str.__str__(k))
+    if isinstance(k, int) and t.__eq__ is int.__eq__ and t.__hash__ is int.__hash__:
+        return ("n", int.__index__(k))
+    return UNKNOWN
+
+
+def keys_match(a, b):
+    return a == b or a == UNKNOWN or b == UNKNOWN
+
+
+def dict_info(canon, d):
+    """Per-key fingerprints of a dict: {key digest: (norm_key, value digest)}, plus
+    the digest of its key order (what iteration and len() depend on)."""
+    keys = {}
+    order = []
+    for k, v in d.items():
+        kd = _digest(canon, k)
+        order.append(kd)
+        keys[kd] = (norm_key(k), _digest(canon, v))
+    return {"keys": keys, "order": _h(*order).hex()}
+
+
+def dict_attrs():
+    """Every plain dict stored as a class attribute: {snapshot key: dict}, the same
+    classes snapshot() walks."""
+    out = {}
+    for modname, mod in sorted(sys.modules.items()):
+        if not (modname == "sqlglot" or modname.startswith("sqlglot.")) or mod is None:
+            continue
+        for name, val in list(vars(mod).items()):
+            if isinstance(val, type) and val.__module__ == modname and val.__qualname__ == name:
+                stack = [val]
+                while stack:
+                    cls = stack.pop()
+                    qual = f"{modname}:{cls.__qualname__}"
+                    for an, av in list(cls.__dict__.items()):
+                        if isinstance(av, type) and av.__module__ == modname and av.__qualname__ == f"{cls.__qualname__}.{an}":
+                            stack.append(av)
+                        if type(av) is dict and _kind(cls, an, av) == "plain" and an not in _SKIP:
+                            out[("a", qual, an)] = av
+    return out
+
+
+def aliases(dicts):
+    """Snapshot keys of dicts that are the very same object as another one's."""
+    by_id = {}
+    for k, d in dicts.items():
+        by_id.setdefault(id(d), []).append(k)
+    return {k: tuple(sorted(g)) for g in by_id.values() if len(g) > 1 for k in g}
+
+
 def snapshot():
     canon = _Canon()
     out = {}
@@ -256,11 +345,26 @@ def main():
     sys.setrecursionlimit(20000)
     cmd, src = sys.argv[1], os.path.abspath(sys.argv[2])
     sys.path.insert(0, src)
+    want = None
     if cmd == "patched":
-        files = pickle.load(sys.stdin.buffer)
+        payload = pickle.load(sys.stdin.buffer)
+        files, want = payload["files"], payload.get("dicts", {})
         sys.meta_path.insert(0, _Overlay({os.path.join(src, k): v for k, v in files.items()}))
     fail = import_all()
     result = {"snap": snapshot(), "fail": fail}
+    # Per-key fingerprints of class-level dicts (all of them at build time; in a
+    # patched run only those whose digest differs from the pinned commit's).
+    dicts = dict_attrs()
+    result["alias"] = aliases(dicts)
+    if want is not None:
+        dicts = {k: d for k, d in dicts.items() if want.get(k) != result["snap"][k][0]}
+    canon = _Canon()
+    result["dicts"] = {k: dict_info(canon, d) for k, d in dicts.items()}
+    if cmd == "patched" and payload.get("replay") is not None:
+        import tokreplay
+
+        result["replay"] = tokreplay.replay(payload["replay"], payload.get("budget"), payload.get("replay_base"),
+                                            payload.get("probe", 0), payload.get("probe_max", 1.0))
     if cmd == "snapshot":
         # entries that differ between two processes (loop variables left in class
         # bodies by iterating a set) are noise, not something a patch did

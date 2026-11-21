@@ -12,7 +12,11 @@ RUN python /app/tools/fetch_sqlglot.py /opt/sqlglot \
 
 COPY blast /app/blast
 COPY tools/build_importstate.sh /app/tools/build_importstate.sh
+# The pinned commit's result for every recorded tokenizer call, made in this image
+# so the selector's replays of the patched tokenizer compare like with like.
 RUN sh /app/tools/build_importstate.sh /opt/sqlglot /app/blast/importstate.pkl \
+    && PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tokreplay.py base /opt/sqlglot \
+       /app/blast/tokreplay.pkl.xz /app/blast/tokreplay_base.pkl \
     && python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/profiles.pkl.xz'), open('/app/blast/prover_data/profiles.pkl', 'wb'))" \
     && python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/union.pkl.xz'), open('/app/blast/prover_data/union.pkl', 'wb'))" \
     && rm /app/blast/prover_data/profiles.pkl.xz /app/blast/prover_data/union.pkl.xz \
