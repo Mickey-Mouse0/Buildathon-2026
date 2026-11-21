@@ -48,37 +48,44 @@ def pack(numbers, ms):
 
 
 class _LineView:
-    """Read-only {str(line): test numbers} view of one file in the selector's map."""
+    """{str(line): test numbers} for one file: the prover's own map plus the selector's."""
 
-    def __init__(self, per_line, to_number):
-        self.per_line = per_line
+    def __init__(self, per_line, to_number, own):
+        self.per_line = per_line or {}
         self.to_number = to_number
+        self.own = own or {}
 
     def get(self, key, default=()):
         s = self.per_line.get(int(key))
-        if not s:
+        mine = {self.to_number[i] for i in s} if s else set()
+        theirs = self.own.get(key, ())
+        if not mine and not theirs:
             return default
-        return {self.to_number[i] for i in s}
+        return mine | set(theirs)
 
 
 class _FileView:
-    def __init__(self, line2t, to_number):
+    def __init__(self, line2t, to_number, own):
         self.line2t = line2t
         self.to_number = to_number
+        self.own = own
 
     def get(self, path, default=None):
-        m = self.line2t.get(path)
-        return _LineView(m, self.to_number) if m is not None else ({} if default is None else default)
+        return _LineView(self.line2t.get(path), self.to_number, self.own.get(path))
 
 
 def use_selector_coverage(prover, maps, to_number):
-    """Point the prover's "never executed" lemma at the selector's map.
+    """Let the prover's "never executed" lemma see the selector's map as well.
 
     That map was recorded inside the scorer's base image and resets per-process caches
     between tests, so code that fills a cache is credited to every test relying on it.
+    A line counts as executed by a test if either map says so.
     """
-    prover.lines = _FileView(maps.line2t, to_number)
-    prover.import_lines = {f: set(v) for f, v in maps.importtime.items()}
+    prover.lines = _FileView(maps.line2t, to_number, prover.lines)
+    imported = {f: set(v) for f, v in prover.import_lines.items()}
+    for f, v in maps.importtime.items():
+        imported.setdefault(f, set()).update(v)
+    prover.import_lines = imported
 
 
 def main():
