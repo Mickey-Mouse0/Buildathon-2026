@@ -4,6 +4,10 @@ Everything used to build and check the prover's data in `blast/prover_data/`. No
 
 ## Rebuild the data
 
+Record inside the scorer's image (see `CLAUDE.md`): `tools/prover/record_in_image.sh <sqlglot checkout> <out dir> [linux/arm64|linux/amd64]` runs every step below in the pinned image and writes `profiles.pkl.xz`, `union.pkl.xz`, `heavy_map.json.gz` and `target_index.json.gz` to the out dir, which you then copy into `blast/prover_data/`. It takes about 30 minutes on 12 cores. `tools/prover/dropped_check.py` runs the tests a version drops, compared with a baseline, on planted bugs.
+
+The steps, for reference:
+
 You need Python 3.13 (`python3.13` on your PATH, or set `PYTHON313`) and about 2 GB of disk space.
 
 ```bash
