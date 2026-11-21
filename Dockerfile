@@ -17,6 +17,7 @@ COPY tools/build_importstate.sh /app/tools/build_importstate.sh
 RUN sh /app/tools/build_importstate.sh /opt/sqlglot /app/blast/importstate.pkl \
     && PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tokreplay.py base /opt/sqlglot \
        /app/blast/tokreplay.pkl.xz /app/blast/tokreplay_base.pkl \
+    && PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcmap.py expected /opt/sqlglot /app/blast/tpc_expected.pkl \
     && python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/profiles.pkl.xz'), open('/app/blast/prover_data/profiles.pkl', 'wb'))" \
     && python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/union.pkl.xz'), open('/app/blast/prover_data/union.pkl', 'wb'))" \
     && rm /app/blast/prover_data/profiles.pkl.xz /app/blast/prover_data/union.pkl.xz \

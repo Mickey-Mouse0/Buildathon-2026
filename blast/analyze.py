@@ -27,6 +27,29 @@ DIALECT_DIRS = ("sqlglot.dialects.", "sqlglot.parsers.", "sqlglot.generators.",
                 "sqlglot.tokenizers.", "sqlglot.typing.")
 
 
+# TestExecutor.setUpClass loads both TPC query files into class attributes, so the map
+# credits each file to every TestExecutor test. Only these tests read the attribute
+# holding that file's queries (self.tpch_sqls / self.tpcds_sqls).
+EXECUTOR = "tests/test_executor.py::TestExecutor::"
+TPC_SQL = {
+    "tests/fixtures/optimizer/tpc-h/tpc-h.sql": ("test_optimized_tpch", "test_execute_tpch"),
+    "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql": ("test_execute_tpcds",),
+}
+
+
+def tpc_pairs_load(text):
+    """What tests/helpers.load_sql_fixture_pairs does with a file's text, at the pinned
+    commit: raises exactly when it would raise inside setUpClass."""
+    statements = "\n".join(l for l in text.splitlines() if l and not l.startswith("--")).split(";")
+    for i in range(0, len(statements), 2):
+        if i + 1 < len(statements):
+            lines = statements[i].strip().split("\n")
+            j = 0
+            while lines[j].startswith("#"):
+                key, val = lines[j].split(":", maxsplit=1)
+                j += 1
+
+
 class Maps:
     def __init__(self, path, src):
         with gzip.open(path, "rb") as f:
@@ -179,12 +202,36 @@ class Analyzer:
             return set()
         return out
 
+    # ---- TPC query files ---------------------------------------------------
+    def tpc_sql(self, fc, path, tests, notes):
+        """Drop the TestExecutor tests that never read this file's queries, unless the
+        edited file would make setUpClass itself fail (then the whole class fails)."""
+        m = self.m
+        try:
+            with open(os.path.join(m.src, path), encoding="utf-8") as f:
+                new = fc.apply(f.read())
+            if new is None or "\ufffd" in new:
+                return tests
+            tpc_pairs_load(new)
+        except Exception:
+            notes.append("TPC file breaks setUpClass: whole class")
+            return tests
+        keep = {EXECUTOR + n for n in TPC_SQL[path]}
+        out = {i for i in tests if not (m.tests[i].startswith(EXECUTOR) and m.tests[i] not in keep)}
+        notes.append(f"TPC file: {len(tests) - len(out)} executor tests dropped")
+        return out
+
     # ---- module constants -----------------------------------------------
-    def module_global(self, path, names, notes, depth=0):
+    def module_global(self, path, names, notes, depth=0, own_file=False):
+        """own_file: only code in this module can see the name (a module object
+        bound by `import x`: nothing reaches it as othermodule.x)."""
         m = self.m
         out = set()
+        modname = path[:-3].replace("/", ".").removesuffix(".__init__")
         for n in names:
             for e in m.names.get(n, ()):
+                if own_file and e[1] != (modname if e[0] == "classbody" else path):
+                    continue
                 if e[0] == "func":
                     out |= m.func_range(e[1], e[2], e[4])
                 elif e[0] == "classbody":
@@ -198,6 +245,21 @@ class Analyzer:
                         out |= self.module_global(p, tg, notes, depth + 1)
         notes.append(f"global {','.join(sorted(names))}: {len(out)}")
         return out
+
+    def _star_imported(self, mod):
+        if not hasattr(self, "_stars"):
+            stars = set()
+            for top in ("sqlglot", "tests"):
+                for dp, _, fns in os.walk(os.path.join(self.m.src, top)):
+                    for fn in fns:
+                        if fn.endswith(".py"):
+                            with open(os.path.join(dp, fn), encoding="utf-8", errors="replace") as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if line.startswith("from ") and line.split("#")[0].rstrip().endswith("import *"):
+                                        stars.add(line.split()[1])
+            self._stars = stars
+        return mod in self._stars
 
     # ---- python source -----------------------------------------------------
     def python_file(self, fc, notes):
@@ -324,6 +386,8 @@ class Analyzer:
                     notes.append(f"unmapped data file {path}")
                     return None, notes
                 notes.append(f"data file {path}: {len(s)}")
+                if path in TPC_SQL:
+                    s = self.tpc_sql(fc, path, s, notes)
                 out |= s
             elif path.startswith("tests/") and path.endswith(".py"):
                 s = m.tests_by_file.get(path)
@@ -431,6 +495,10 @@ class Analyzer:
                     continue
                 if kinds == {"callable"} and ownfn:
                     continue  # a method's own def/body change: the line rules cover it
+                if kinds == {"callable"} and b is not None and b[2] and a is None:
+                    # a method written here was deleted: everything that called it ran
+                    # its lines, which the line rules already map
+                    continue
                 if "enum" in kinds:
                     notes.append(f"import diff: enum {ck}.{name}")
                     return None
@@ -447,7 +515,10 @@ class Analyzer:
                 path = mod.replace(".", "/") + ".py"
                 if not os.path.exists(os.path.join(m.src, path)):
                     path = mod.replace(".", "/") + "/__init__.py"
-                s = self.module_global(path, {name}, notes)
+                # a module bound by `import x` (added or dropped) is seen only by
+                # code in this file, unless another module star-imports this one
+                own = kinds == {"module"} and not self._star_imported(mod)
+                s = self.module_global(path, {name}, notes, own_file=own)
                 out |= s
         notes.append(f"import diff: {len(changed)} changed, {len(out)} tests")
         return out

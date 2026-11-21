@@ -106,6 +106,15 @@ def cost(numbers, ms):
 _baseline = []
 _tests = []
 _last_import = []
+# The scorer stops us after 3 minutes of wall time. The child-process checks are
+# optional, so they stop starting once a share of that is gone, and a child that
+# runs long is cut off (its commit then keeps its tests).
+_T0 = time.monotonic()
+CHECK_DEADLINE_S = 110
+
+
+def _time_left():
+    return CHECK_DEADLINE_S - (time.monotonic() - _T0)
 
 
 def _overlay(files, notes=None):
@@ -139,12 +148,15 @@ def patched_import(files, notes, replay=None, budget=None, **replay_opts):
     if overlay is None:
         return None
     # the same hash seed as the build-time snapshot, so sets of strings line up
+    if _time_left() < 5:
+        notes.append("import diff skipped: out of time")
+        return None
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONHASHSEED="0")
     # the child fingerprints dict settings key by key only where they differ from these
     want = {k: _baseline[0]["snap"][k][0] for k in _baseline[0].get("dicts", ())}
     payload = {"files": overlay, "dicts": want, "replay": replay, "budget": budget, **replay_opts}
     r = subprocess.run([sys.executable, str(HERE / "importstate.py"), "patched", SRC],
-                       input=pickle.dumps(payload), capture_output=True, env=env, timeout=150)
+                       input=pickle.dumps(payload), capture_output=True, env=env, timeout=min(150, _time_left()))
     if r.returncode != 0:
         notes.append(f"import diff failed: {r.stderr.decode(errors='replace')[-200:]}")
         return None
@@ -237,6 +249,94 @@ def tokenizer_replay(tok, maps, files, chosen, ms, notes):
     notes.append(f"replay: {len(need)} calls, {len(affected)} tests differ, {len(outside & set(chosen))} read a changed "
                  f"setting outside, kept {len(kept)} of {len(chosen)}")
     return kept
+
+
+TPC_MAP = os.environ.get("BLAST_TPC_MAP", str(HERE / "tpc_map.pkl.gz"))
+TPC_EXPECTED = os.environ.get("BLAST_TPC_EXPECTED", str(HERE / "tpc_expected.pkl"))
+_tpc = []
+
+
+def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
+    """Drop a TPC executor test when the queries the patch reaches all give the
+    pinned commit's results (blast/tpcmap.py). Queries it doesn't reach can't
+    change, by the per-query map."""
+    if not (os.path.exists(TPC_MAP) and os.path.exists(TPC_EXPECTED)):
+        return chosen
+    # The check replays the queries and data as they were at build time, so it can't
+    # judge an edit to a test or fixture file (a TPC query file edit changes the query).
+    if any(not fc.path.startswith("sqlglot/") for fc in files):
+        return chosen
+    if not _tpc:
+        import gzip
+
+        with gzip.open(TPC_MAP, "rb") as f:
+            qmaps = pickle.load(f)
+        with open(TPC_EXPECTED, "rb") as f:
+            cpu = {t: [r["cpu"] for r in rows] for t, rows in pickle.load(f).items()}
+        _tpc.append((qmaps, cpu))
+    qmaps, cpu = _tpc[0]
+    m = analyzer.m
+    drop, jobs, est = set(), {}, 0.0
+    for test_id, qm in qmaps.items():
+        n = by_id.get(test_id)
+        if n is None or n not in chosen:
+            continue
+        sub = Maps.__new__(Maps)
+        sub.__dict__.update(m.__dict__)
+        sub.__dict__.update({k: qm[k] for k in ("tests", "line2t", "open2t", "attr2t", "cls2t")})
+        sub.tests_by_file = {}
+        sub.all = frozenset(range(len(qm["tests"])))
+        qa = Analyzer(sub)
+        q, notes = qa.analyze(text, files)
+        if q is None:
+            log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: all queries ({'; '.join(notes[-2:])})")
+            continue
+        if not q:
+            log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: no query reaches the change")
+            drop.add(n)
+            continue
+        jobs[test_id] = sorted(q)
+        est += sum(cpu[test_id][i] for i in q)
+    if jobs:
+        rest = [x for x in chosen if x not in drop]
+        gain = cost(rest, ms) - cost([x for x in rest if x not in {by_id[t] for t in jobs}], ms)
+        # the check costs CPU whether or not it clears the tests, so only run it
+        # with a margin over what dropping them would save
+        if (est + 0.5) * 1000 >= 0.8 * gain:
+            log(cid, f"tpc check skipped: ~{est:.1f}s of queries for {gain / 1000:.1f}s")
+        elif _time_left() < 3 * est + 10:
+            log(cid, f"tpc check skipped: out of time ({_time_left():.0f}s left, ~{est:.1f}s of queries)")
+        else:
+            overlay = {}
+            for fc in files:
+                p = fc.path
+                if fc.new_path is None or not p.endswith(".py"):
+                    if p.startswith("sqlglot/"):
+                        overlay = None
+                        break
+                    continue
+                if not p.startswith("sqlglot/"):
+                    continue
+                old = ""
+                if fc.old_path is not None:
+                    with open(os.path.join(SRC, fc.old_path)) as f:
+                        old = f.read()
+                overlay[fc.new_path] = fc.apply(old)
+                if overlay[fc.new_path] is None:
+                    overlay = None
+                    break
+            if overlay is not None:
+                env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SKIP_INTEGRATION="0")
+                r = subprocess.run([sys.executable, str(HERE / "tpcmap.py"), "check", SRC, TPC_EXPECTED],
+                                   input=pickle.dumps({"overlay": overlay, "jobs": jobs}),
+                                   capture_output=True, env=env, timeout=_time_left())
+                verdict = pickle.loads(r.stdout) if r.returncode == 0 else {}
+                for test_id, qs in jobs.items():
+                    ok = verdict.get(test_id, False)
+                    log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: {len(qs)} queries reached, {'same results, dropped' if ok else 'kept'}")
+                    if ok:
+                        drop.add(by_id[test_id])
+    return [x for x in chosen if x not in drop]
 
 
 def main():
@@ -339,6 +439,11 @@ def main():
                     log(cid, "; ".join(tnotes))
             except Exception as e:
                 log(cid, "tokenizer replay error, keeping the tests:", repr(e))
+        if analyzer is not None and chosen:
+            try:
+                chosen = tpc_check(cid, analyzer, files, text, chosen, ms, by_id)
+            except Exception as e:
+                log(cid, "tpc check error, keeping the tests:", repr(e))
         workers = pack(chosen, ms)
         if workers:
             total += max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)
