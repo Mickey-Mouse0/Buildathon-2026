@@ -642,8 +642,19 @@ class Analyzer:
                     # its lines, which the line rules already map
                     continue
                 if "enum" in kinds:
-                    notes.append(f"import diff: enum {ck}.{name}")
-                    return None
+                    # a new member, or the enum's own bookkeeping (_member_names_,
+                    # _hashable_values_, ...) that lists it
+                    new = b is None or (name.startswith("_") and name.endswith("_") and a is not None)
+                    s = self.enum_users(ck) if kinds == {"enum"} and new else None
+                    if s is None:
+                        notes.append(f"import diff: enum {ck}.{name}")
+                        return None
+                    # a new member: only code that uses the enum as a whole can see it
+                    # (other members keep their names; a shifted IntEnum value changed
+                    # no test when every TokenType moved up by 3)
+                    notes.append(f"import diff: new enum member {ck}.{name}: {len(s)}")
+                    out |= s
+                    continue
                 u = users(ck)
                 if u is None:
                     notes.append(f"import diff: {ck}.{name} changed, class has no recorded users")
@@ -663,6 +674,36 @@ class Analyzer:
                 s = self.module_global(path, {name}, notes, own_file=own, funcs_only=True)
                 out |= s
         notes.append(f"import diff: {len(changed)} changed, {len(out)} tests")
+        return out
+
+    def enum_users(self, ck):
+        """Tests running a function that uses enum class ck (or a plain alias of it,
+        like DataType.Type = DType) as a whole: iterating it, X[name], X(value),
+        getattr(X, name), ... (build_map.whole_mentions). None without that index."""
+        m = self.m
+        wnames = getattr(m, "wnames", None)
+        if wnames is None:
+            return None
+        cname = ck.split(":")[1].split(".")[-1]
+        alias_of = wnames.get("<aliases>", {})
+        aliases, work = {cname}, [cname]
+        while work:
+            for a in alias_of.get(work.pop(), ()):
+                if a not in aliases:
+                    aliases.add(a)
+                    work.append(a)
+        funcs = {}
+        for es in (m.names.get(a, ()) for a in aliases):
+            for e in es:
+                if e[0] == "func":
+                    funcs[(e[1], e[2])] = e
+        out = set()
+        for a in aliases:
+            for key in wnames.get(a, ()):
+                e = funcs.get(key)
+                if e is None:
+                    return None
+                out |= m.func_range(e[1], e[2], e[4])
         return out
 
     def dict_key_readers(self, k, before, after, notes):

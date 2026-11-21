@@ -1,4 +1,4 @@
-"""Add the global-capable name index (build_map.global_mentions) to a built map.
+"""Add the static name indexes (build_map.global_mentions, whole_mentions) to a built map.
 
     python tools/global_names.py <sqlglot dir> <covmap.pkl.gz>
 
@@ -17,12 +17,12 @@ def main():
     src, path = sys.argv[1:3]
     with gzip.open(path, "rb") as f:
         d = pickle.load(f)
-    names, gnames = name_index(src)
+    names, gnames, wnames = name_index(src)
     assert names == d["names"], "map was built from another source tree"
-    d["gnames"] = gnames
+    d["gnames"], d["wnames"] = gnames, wnames
     with gzip.open(path, "wb", compresslevel=9) as f:
         pickle.dump(d, f, protocol=pickle.HIGHEST_PROTOCOL)
-    print(f"gnames: {len(gnames)} names", file=sys.stderr)
+    print(f"gnames: {len(gnames)} names, wnames: {len(wnames)}", file=sys.stderr)
 
 
 if __name__ == "__main__":

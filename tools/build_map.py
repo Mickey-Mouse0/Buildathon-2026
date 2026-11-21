@@ -68,6 +68,8 @@ def name_index(src):
     """
     idx = defaultdict(list)
     gidx = defaultdict(set)
+    widx = defaultdict(set)
+    aidx = defaultdict(set)
     # tests/ too: a test can read a module constant directly (test_typing reads
     # every typing module's EXPRESSION_METADATA through importlib)
     walk = [w for top in ("sqlglot", "tests") for w in os.walk(os.path.join(src, top))]
@@ -101,9 +103,13 @@ def name_index(src):
                             idx[nm].append(entry)
                         for nm in global_mentions(st, imported):
                             gidx[nm].add((path, start))
+                        for nm in whole_mentions(st):
+                            widx[nm].add((path, start))
                     elif isinstance(st, ast.ClassDef):
                         visit(st.body, qual + [st.name], True)
                     else:
+                        for a, b in aliases_of(st):
+                            aidx[a].add(b)
                         val = getattr(st, "value", None)
                         refs = frozenset(refs_of(val)) if val is not None else frozenset(refs_of(st))
                         names = {n for _, n in refs}
@@ -115,7 +121,62 @@ def name_index(src):
                             idx[nm].append(entry)
 
             visit(tree.body, [], False)
-    return dict(idx), {k: frozenset(v) for k, v in gidx.items()}
+    wnames = {k: frozenset(v) for k, v in widx.items()}
+    wnames["<aliases>"] = {k: frozenset(v) for k, v in aidx.items()}
+    return dict(idx), {k: frozenset(v) for k, v in gidx.items()}, wnames
+
+
+def aliases_of(st):
+    """(name, other name) for a module or class statement that binds the same object
+    under another name: A = X, A: T = mod.X, from m import X as A."""
+    if isinstance(st, ast.ImportFrom):
+        return [(a.name, a.asname) for a in st.names if a.asname and a.asname != a.name]
+    if isinstance(st, (ast.Assign, ast.AnnAssign)) and isinstance(st.value, (ast.Name, ast.Attribute)):
+        v = st.value.id if isinstance(st.value, ast.Name) else st.value.attr
+        return [(v, t) for t in targets_of(st) if t != v]
+    return []
+
+
+def whole_mentions(fn):
+    """Names a function uses as a whole object rather than to reach a member: every
+    mention except X.member (a public attribute) and type annotations. For an enum
+    class, these are the places that can see a member being added: iterating it,
+    len(), X[name], X(value), getattr(X, name), X.__members__."""
+    parent = {}
+    for n in ast.walk(fn):
+        for c in ast.iter_child_nodes(n):
+            parent[c] = n
+    skip = set()
+    for n in ast.walk(fn):
+        anns = []
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = n.args
+            anns += [x.annotation for x in a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg]
+                     if x is not None and x.annotation is not None]
+            if n.returns is not None:
+                anns.append(n.returns)
+        elif isinstance(n, ast.AnnAssign):
+            anns.append(n.annotation)
+        for an in anns:
+            skip |= set(ast.walk(an))
+    out = set()
+    for n in ast.walk(fn):
+        if n in skip:
+            continue
+        if isinstance(n, ast.Name):
+            nm = n.id
+        elif isinstance(n, ast.Attribute):
+            nm = n.attr
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.isidentifier():
+            out.add(n.value)
+            continue
+        else:
+            continue
+        p = parent.get(n)
+        if isinstance(p, ast.Attribute) and p.value is n and not p.attr.startswith("_"):
+            continue  # X.MEMBER, X.method
+        out.add(nm)
+    return out
 
 
 def global_mentions(fn, imported=frozenset()):
@@ -236,7 +297,7 @@ def main(raw_dir, src, out):
         "subclasses": {k: tuple(sorted(v)) for k, v in subclasses.items()},
         "tests_by_file": {k: frozenset(v) for k, v in by_file.items()},
     }
-    data["names"], data["gnames"] = name_index(src)
+    data["names"], data["gnames"], data["wnames"] = name_index(src)
     with gzip.open(out, "wb", compresslevel=9) as f:
         pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"map: {len(ids)} tests, {sum(len(m) for m in line2t.values())} lines, "
