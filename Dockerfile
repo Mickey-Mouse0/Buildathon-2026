@@ -4,10 +4,16 @@ FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf107
 
 # sqlglot's source at the pinned commit, read by the static analyzer.
 COPY tools/fetch_sqlglot.py /app/tools/fetch_sqlglot.py
-RUN python /app/tools/fetch_sqlglot.py /opt/sqlglot && chmod -R a+rX /opt/sqlglot
+# Compiled here so neither the selector nor the import-diff child compiles sqlglot
+# on every run (PYTHONDONTWRITEBYTECODE below means nothing would be cached).
+RUN python /app/tools/fetch_sqlglot.py /opt/sqlglot \
+    && python -c "import compileall; compileall.compile_dir('/opt/sqlglot/sqlglot', quiet=1)" \
+    && chmod -R a+rX /opt/sqlglot
 
 COPY blast /app/blast
-RUN python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/profiles.pkl.xz'), open('/app/blast/prover_data/profiles.pkl', 'wb'))" \
+COPY tools/build_importstate.sh /app/tools/build_importstate.sh
+RUN sh /app/tools/build_importstate.sh /opt/sqlglot /app/blast/importstate.pkl \
+    && python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/profiles.pkl.xz'), open('/app/blast/prover_data/profiles.pkl', 'wb'))" \
     && python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/union.pkl.xz'), open('/app/blast/prover_data/union.pkl', 'wb'))" \
     && rm /app/blast/prover_data/profiles.pkl.xz /app/blast/prover_data/union.pkl.xz \
     && chmod -R a+rX /app \

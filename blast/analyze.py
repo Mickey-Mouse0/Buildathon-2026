@@ -99,8 +99,27 @@ def targets_of(st):
 
 
 class Analyzer:
-    def __init__(self, maps):
+    def __init__(self, maps, import_diff=False):
         self.m = maps
+        # With import_diff, changes whose effect is decided while sqlglot is imported
+        # are not answered here. They are left in self.deferred for the selector,
+        # which compares sqlglot's state after import with and without the patch
+        # (importstate.py) and maps what differs through diff_tests().
+        self.import_diff = import_diff
+        self.deferred = None
+
+    def defer(self, why, fallback, notes):
+        """Leave an import-time question for the import diff. fallback = the tests to
+        take if the diff can't run (None: all of them)."""
+        d = self.deferred
+        if d is None:
+            d = self.deferred = {"fallback": set(), "all": False, "why": []}
+        d["why"].append(why)
+        if fallback is None:
+            d["all"] = True
+        else:
+            d["fallback"] |= fallback
+        notes.append(f"deferred to import diff: {why}")
 
     # ---- class settings -------------------------------------------------
     def class_attr(self, ck, names, notes):
@@ -144,7 +163,10 @@ class Analyzer:
                     if c.startswith(mod + ":"):
                         u |= m.class_usage(c)
             notes.append(f"read at import, class users: {len(u)}")
-            out |= u
+            if self.import_diff:
+                self.defer(f"{ck} {','.join(sorted(names))} read at import", u, notes)
+            else:
+                out |= u
         return out
 
     # ---- module constants -----------------------------------------------
@@ -222,7 +244,12 @@ class Analyzer:
                         n.lineno <= l <= n.end_lineno for n in nested
                     ):
                         notes.append(f"runs at import: {fn.name}")
-                        return None
+                        if not self.import_diff:
+                            return None
+                        # tests that run it after import (classes defined inside tests)
+                        out |= m.lines(path, own)
+                        self.defer(f"import-time code in {outer.name}", None, notes)
+                        continue
                     # A factory: what it builds lives on in the functions it returns.
                     out |= m.func_range(path, outer.lineno, outer.end_lineno)
                     notes.append(f"factory {outer.name}")
@@ -237,9 +264,15 @@ class Analyzer:
                     continue  # blank line or comment inside the class
                 if l < st.lineno and st.decorator_list:
                     notes.append("class decorator")
-                    return None
+                    if not self.import_diff:
+                        return None
+                    self.defer(f"class decorator {st.name}", None, notes)
+                    continue
                 notes.append(f"class header {st.name}")
-                return None
+                if not self.import_diff:
+                    return None
+                self.defer(f"class header {st.name}", None, notes)
+                continue
             lams = [n for n in ast.walk(st) if isinstance(n, ast.Lambda) and n.body.lineno <= l <= n.end_lineno]
             if lams:
                 lam = min(lams, key=lambda n: n.end_lineno - n.lineno)
@@ -249,12 +282,18 @@ class Analyzer:
             names = targets_of(st)
             if isinstance(st, (ast.Import, ast.ImportFrom)):
                 notes.append("import line")
-                return None
+                if not self.import_diff:
+                    return None
+                self.defer(f"import line {l}", None, notes)
+                continue
             if not names:
                 if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant):
                     continue  # docstring
                 notes.append(f"import-time statement at line {l}")
-                return None
+                if not self.import_diff:
+                    return None
+                self.defer(f"import-time statement {path}:{l}", None, notes)
+                continue
             if qual:
                 out |= self.class_attr(f"{modname}:{'.'.join(qual)}", names, notes)
             else:
@@ -263,6 +302,7 @@ class Analyzer:
 
     def analyze(self, patch_text, files):
         """Candidate test indexes for one patch, or None for 'all'."""
+        self.deferred = None
         notes = []
         out = set()
         m = self.m
@@ -297,3 +337,93 @@ class Analyzer:
             else:
                 notes.append(f"ignored {path}")
         return out, notes
+
+
+    # ---- import diff ------------------------------------------------------
+    def diff_tests(self, before, after, notes):
+        """Tests that can see what differs between two importstate snapshots, or
+        None when something differs that the map can't attribute to tests."""
+        self.import_diff, saved = False, self.import_diff
+        try:
+            return self._diff_tests(before, after, notes)
+        finally:
+            self.import_diff = saved
+
+    def _diff_tests(self, before, after, notes):
+        m = self.m
+        bsnap, asnap = before["snap"], after["snap"]
+        if set(after["fail"]) - set(before["fail"]):
+            notes.append(f"import fails: {sorted(set(after['fail']) - set(before['fail']))[:3]}")
+            return None
+        unstable = before.get("unstable", set())
+        classes_before = {k[1] for k in bsnap if k[0] == "a"}
+        if not hasattr(m, "_bases"):
+            bases = {}
+            for b, subs in m.subclasses.items():
+                for c in subs:
+                    bases.setdefault(c, set()).add(b)
+            m._bases = bases
+        out = set()
+        changed = []
+        for k in bsnap.keys() | asnap.keys():
+            b, a = bsnap.get(k), asnap.get(k)
+            if b == a or k in unstable:
+                continue
+            if b and a and b[0].endswith("!opaque") and a[0].endswith("!opaque"):
+                continue
+            changed.append(k)
+        def users(ck):
+            """Tests that read any of the class's settings, or ran a function that
+            names the class (instances only come from code that names it)."""
+            u = set(m.class_usage(ck))
+            for part in {ck.split(":")[1].split(".")[-1], ck.split(":")[1].split(".")[0]}:
+                for e in m.names.get(part, ()):
+                    if e[0] == "func":
+                        u |= m.func_range(e[1], e[2], e[4])
+            return u if u else None
+        for k in sorted(changed):
+            b, a = bsnap.get(k), asnap.get(k)
+            kinds = {e[1] for e in (b, a) if e}
+            ownfn = all(e[2] for e in (b, a) if e) and b is not None and a is not None
+            if k[0] == "a":
+                _, ck, name = k
+                if ck not in classes_before:
+                    continue  # a new class: anything that refers to it differs too
+                if kinds == {"plain"}:
+                    s = set(m.attr2t.get(f"{ck}.{name}", ()))
+                    for sc in m.subclasses.get(ck, ()):
+                        s |= m.attr2t.get(f"{sc}.{name}", set())
+                    if b is None or a is None:
+                        # it now shadows (or stops shadowing) an inherited setting,
+                        # whose reads were recorded on the base class
+                        u = users(ck)
+                        if u is None:
+                            notes.append(f"import diff: no users of {ck}")
+                            return None
+                        for base in m._bases.get(ck, ()):
+                            s |= m.attr2t.get(f"{base}.{name}", set()) & u
+                    notes.append(f"import diff {ck}.{name}: {len(s)}")
+                    out |= s
+                    continue
+                if kinds == {"callable"} and ownfn:
+                    continue  # a method's own def/body change: the line rules cover it
+                if "enum" in kinds:
+                    notes.append(f"import diff: enum {ck}.{name}")
+                    return None
+                u = users(ck)
+                if u is None:
+                    notes.append(f"import diff: {ck}.{name} changed, class has no recorded users")
+                    return None
+                notes.append(f"import diff {ck}.{name} ({'/'.join(sorted(kinds))}): class users {len(u)}")
+                out |= u
+            else:
+                _, mod, name = k
+                if kinds == {"callable"} and ownfn:
+                    continue
+                path = mod.replace(".", "/") + ".py"
+                if not os.path.exists(os.path.join(m.src, path)):
+                    path = mod.replace(".", "/") + "/__init__.py"
+                s = self.module_global(path, {name}, notes)
+                out |= s
+        notes.append(f"import diff: {len(changed)} changed, {len(out)} tests")
+        return out

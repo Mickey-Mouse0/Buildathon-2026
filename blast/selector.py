@@ -6,6 +6,8 @@ Logs go to stderr.
 import gc
 import json
 import os
+import pickle
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -20,6 +22,9 @@ DATA = Path(os.environ.get("BLAST_DATA", "/data"))
 SRC = os.environ.get("BLAST_SQLGLOT", "/opt/sqlglot")
 MAP = os.environ.get("BLAST_MAP", str(HERE / "covmap.pkl.gz"))
 PROVER_DATA = Path(os.environ.get("BLAST_PROVER_DATA", str(HERE / "prover_data")))
+IMPORT_STATE = os.environ.get("BLAST_IMPORT_STATE", str(HERE / "importstate.pkl"))
+# Only pay for an import diff (~1 s of CPU) when its fallback would cost more than this.
+DIFF_MIN_GAIN_MS = int(os.environ.get("BLAST_DIFF_MIN_GAIN_MS", "1200"))
 WORKER_MS = 2000
 MAX_WORKERS = 8
 
@@ -88,6 +93,46 @@ def use_selector_coverage(prover, maps, to_number):
     prover.import_lines = imported
 
 
+def cost(numbers, ms):
+    w = pack(numbers, ms)
+    return max(sum(ms[n] for n in x) for x in w) + WORKER_MS * len(w) if w else 0
+
+
+_baseline = []
+
+
+def import_diff(analyzer, files, notes):
+    """Map test indexes for what the patch changes in sqlglot's state after import,
+    or None if that can't be worked out."""
+    if not _baseline:
+        with open(IMPORT_STATE, "rb") as f:
+            _baseline.append(pickle.load(f))
+    overlay = {}
+    for fc in files:
+        p = fc.path
+        if not (p.startswith("sqlglot/") and p.endswith(".py")):
+            continue
+        if fc.new_path is None:
+            notes.append(f"import diff: {p} deleted")
+            return None
+        old = ""
+        if fc.old_path is not None:
+            with open(os.path.join(SRC, fc.old_path)) as f:
+                old = f.read()
+        new = fc.apply(old)
+        if new is None:
+            return None
+        overlay[fc.new_path] = new
+    # the same hash seed as the build-time snapshot, so sets of strings line up
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONHASHSEED="0")
+    r = subprocess.run([sys.executable, str(HERE / "importstate.py"), "patched", SRC],
+                       input=pickle.dumps(overlay), capture_output=True, env=env, timeout=60)
+    if r.returncode != 0:
+        notes.append(f"import diff failed: {r.stderr.decode(errors='replace')[-200:]}")
+        return None
+    return analyzer.diff_tests(_baseline[0], pickle.loads(r.stdout), notes)
+
+
 def main():
     # The maps are millions of small objects; the cycle collector would rescan them
     # over and over while they load. Nothing here builds garbage cycles worth freeing.
@@ -100,7 +145,7 @@ def main():
     try:
         maps = Maps(MAP, SRC)
         to_number = [by_id.get(t) for t in maps.tests]
-        analyzer = Analyzer(maps)
+        analyzer = Analyzer(maps, import_diff=os.path.exists(IMPORT_STATE))
     except Exception as e:
         log("map failed to load, running everything:", repr(e))
         analyzer = None
@@ -122,10 +167,30 @@ def main():
         try:
             if analyzer is not None:
                 text = patch.read_text(errors="replace")
-                idx, notes = analyzer.analyze(text, patchutil.parse(text))
+                files = patchutil.parse(text)
+                idx, notes = analyzer.analyze(text, files)
+                d = analyzer.deferred
+                if idx is not None and d is not None:
+                    num = lambda s: {to_number[i] for i in s if to_number[i] is not None}
+                    base = num(idx)
+                    if not d["all"] and cost(base | num(d["fallback"]), ms) - cost(base, ms) < DIFF_MIN_GAIN_MS:
+                        idx = idx | d["fallback"]
+                        notes.append("import diff skipped: fallback is cheap")
+                    else:
+                        try:
+                            extra = import_diff(analyzer, files, notes)
+                        except Exception as e:
+                            notes.append(f"import diff error {e!r}")
+                            extra = None
+                        if extra is not None:
+                            idx = idx | extra
+                        elif d["all"]:
+                            idx = None
+                        else:
+                            idx = idx | d["fallback"]
                 if idx is not None:
                     chosen = sorted({to_number[i] for i in idx if to_number[i] is not None})
-                log(cid, "all" if idx is None else len(chosen), "; ".join(notes[:8]))
+                log(cid, "all" if idx is None else len(chosen), "; ".join(notes[:6] + notes[-4:] if len(notes) > 10 else notes))
         except Exception as e:
             log(cid, "error, running everything:", repr(e))
             chosen = every

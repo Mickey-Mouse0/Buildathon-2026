@@ -3,3 +3,4 @@ __pycache__/
 build/
 blast/prover_data/profiles.pkl
 blast/prover_data/union.pkl
+blast/importstate.pkl
