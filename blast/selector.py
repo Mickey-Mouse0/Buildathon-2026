@@ -253,6 +253,7 @@ def tokenizer_replay(tok, maps, files, chosen, ms, notes):
 
 TPC_MAP = os.environ.get("BLAST_TPC_MAP", str(HERE / "tpc_map.pkl.gz"))
 TPC_EXPECTED = os.environ.get("BLAST_TPC_EXPECTED", str(HERE / "tpc_expected.pkl"))
+TPC_EXEC_INIT = "sqlglot/executor/__init__.py"
 _tpc = []
 
 
@@ -281,10 +282,14 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
         with gzip.open(TPC_MAP, "rb") as f:
             qmaps = pickle.load(f)
         with open(TPC_EXPECTED, "rb") as f:
-            cpu = {t: [r["cpu"] for r in rows] for t, rows in pickle.load(f).items()}
-        _tpc.append((qmaps, cpu))
-    qmaps, cpu = _tpc[0]
-    drop, jobs, est = set(), {}, 0.0
+            rows_of = pickle.load(f)
+        cpu = {t: [r["cpu"] for r in rows] for t, rows in rows_of.items()}
+        # per query: the CPU of its front half, where the build got a fingerprint for it
+        cpu_front = {t: [r.get("cpu_front") if r.get("front") is not None else None for r in rows]
+                     for t, rows in rows_of.items()}
+        _tpc.append((qmaps, cpu, cpu_front))
+    qmaps, cpu, cpu_front = _tpc[0]
+    drop, jobs, fronts, est = set(), {}, {}, 0.0
     for test_id, qm in qmaps.items():
         n = by_id.get(test_id)
         if n is None or n not in chosen:
@@ -305,10 +310,21 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
             log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: no query reaches the change")
             drop.add(n)
             continue
+        # Queries the patch reaches only before the executor starts (the "exec" map
+        # is the back half alone) are checked by their front half, without the data.
+        # blast/tpcmap.py repeats execute()'s body to split it, so a patch to that
+        # file, or anything unclear, means the back half for every query.
+        front = set()
+        if "exec" in qm and not any(fc.path == TPC_EXEC_INIT for fc in files):
+            sub.__dict__.update({k: qm["exec"][k] for k in ("tests", "line2t", "open2t", "attr2t", "cls2t")})
+            back, _ = Analyzer(sub).analyze(text, files)
+            if back is not None:
+                front = {i for i in q if i not in back and cpu_front[test_id][i] is not None}
         # heaviest first: they run the most code, so a patch that changes any result
         # most likely changes theirs, and the check stops there
-        jobs[test_id] = sorted(q, key=lambda i: (-cpu[test_id][i], i))
-        est += sum(cpu[test_id][i] for i in q)
+        jobs[test_id] = sorted(q - front, key=lambda i: (-cpu[test_id][i], i))
+        fronts[test_id] = sorted(front, key=lambda i: (-cpu_front[test_id][i], i))
+        est += sum(cpu[test_id][i] for i in q - front) + sum(cpu_front[test_id][i] for i in front)
     if jobs:
         rest = [x for x in chosen if x not in drop]
         gain = cost(rest, ms) - cost([x for x in rest if x not in {by_id[t] for t in jobs}], ms)
@@ -338,14 +354,16 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
                     overlay = None
                     break
             if overlay is not None:
-                env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SKIP_INTEGRATION="0")
+                # hash seed 0, as at build: the front fingerprints hold cached hashes
+                env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SKIP_INTEGRATION="0", PYTHONHASHSEED="0")
                 r = subprocess.run([sys.executable, str(HERE / "tpcmap.py"), "check", SRC, TPC_EXPECTED],
-                                   input=pickle.dumps({"overlay": overlay, "jobs": jobs}),
+                                   input=pickle.dumps({"overlay": overlay, "jobs": jobs, "front": fronts}),
                                    capture_output=True, env=env, timeout=_time_left())
                 verdict = pickle.loads(r.stdout) if r.returncode == 0 else {}
                 for test_id, qs in jobs.items():
                     ok = verdict.get(test_id, False)
-                    log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: {len(qs)} queries reached, {'same results, dropped' if ok else 'kept'}")
+                    log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: {len(qs) + len(fronts[test_id])} queries reached "
+                             f"({len(fronts[test_id])} by their front half), {'same results, dropped' if ok else 'kept'}")
                     if ok:
                         drop.add(by_id[test_id])
     return [x for x in chosen if x not in drop]
