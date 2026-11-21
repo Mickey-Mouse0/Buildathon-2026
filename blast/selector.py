@@ -3,6 +3,7 @@
 Reads /data/tests.json and /data/commits/*.patch, prints one JSON line a commit.
 Logs go to stderr.
 """
+import gc
 import json
 import os
 import sys
@@ -46,7 +47,44 @@ def pack(numbers, ms):
     return best
 
 
+class _LineView:
+    """Read-only {str(line): test numbers} view of one file in the selector's map."""
+
+    def __init__(self, per_line, to_number):
+        self.per_line = per_line
+        self.to_number = to_number
+
+    def get(self, key, default=()):
+        s = self.per_line.get(int(key))
+        if not s:
+            return default
+        return {self.to_number[i] for i in s}
+
+
+class _FileView:
+    def __init__(self, line2t, to_number):
+        self.line2t = line2t
+        self.to_number = to_number
+
+    def get(self, path, default=None):
+        m = self.line2t.get(path)
+        return _LineView(m, self.to_number) if m is not None else ({} if default is None else default)
+
+
+def use_selector_coverage(prover, maps, to_number):
+    """Point the prover's "never executed" lemma at the selector's map.
+
+    That map was recorded inside the scorer's base image and resets per-process caches
+    between tests, so code that fills a cache is credited to every test relying on it.
+    """
+    prover.lines = _FileView(maps.line2t, to_number)
+    prover.import_lines = {f: set(v) for f, v in maps.importtime.items()}
+
+
 def main():
+    # The maps are millions of small objects; the cycle collector would rescan them
+    # over and over while they load. Nothing here builds garbage cycles worth freeing.
+    gc.disable()
     t0 = time.process_time()
     tests = json.loads((DATA / "tests.json").read_text())["tests"]
     ms = {t["number"]: int(t["seconds"] * 1000 + 0.5) for t in tests}
@@ -65,6 +103,8 @@ def main():
         from prove import load_packaged
 
         prover = load_packaged(PROVER_DATA, SRC, tests)
+        if analyzer is not None:
+            use_selector_coverage(prover, maps, to_number)
         log(f"prover loaded for {len(prover.heavy)} heavy tests")
     except Exception as e:
         log("prover failed to load, using the selector alone:", repr(e))

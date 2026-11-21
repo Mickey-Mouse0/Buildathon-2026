@@ -67,7 +67,12 @@ def name_index(src):
     ("module", path, targets): a module-level statement that mentions it
     """
     idx = defaultdict(list)
-    for dp, _, fns in os.walk(os.path.join(src, "sqlglot")):
+    # tests/ too: a test can read a module constant directly (test_typing reads
+    # every typing module's EXPRESSION_METADATA through importlib)
+    walk = [w for top in ("sqlglot", "tests") for w in os.walk(os.path.join(src, top))]
+    for dp, _, fns in walk:
+        if "fixtures" in dp.split(os.sep):
+            continue
         for fn in sorted(fns):
             if not fn.endswith(".py"):
                 continue
