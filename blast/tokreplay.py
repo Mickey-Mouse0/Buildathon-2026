@@ -238,10 +238,35 @@ def _pure_inserts(fc):
     return out
 
 
+def _start(n):
+    return min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])])
+
+
+def _outside_function(tree, l):
+    """What line l is when no function holds it: "blank" (comment or blank line),
+    "setting" (an assignment in a module or class body, with no lambda in it), or
+    None for anything else (class headers, imports, other statements, docstrings)."""
+    body = tree.body
+    while True:
+        st = next((s for s in body if _start(s) <= l <= s.end_lineno), None)
+        if st is None:
+            return "blank"
+        if isinstance(st, ast.ClassDef):
+            if not st.body or l < _start(st.body[0]):
+                return None
+            body = st.body
+            continue
+        if isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            return None if any(isinstance(x, ast.Lambda) for x in ast.walk(st)) else "setting"
+        return None
+
+
 def changed_spots(files, src):
     """For each changed .py file under sqlglot/: the changed lines that sit in a function
-    body, and whether any changed line sits elsewhere (class body, module level, a def
-    line). None if a file can't be read this way."""
+    body, and whether any changed line is a setting (an assignment in a module or class
+    body). None when a line is anything else: a def line, decorator, lambda, class
+    header, import or other statement. Those change code the import diff can't see (a
+    function's fingerprint leaves out its code), so replay must not judge them."""
     body, elsewhere = {}, False
     for fc in files:
         p = fc.path
@@ -257,19 +282,18 @@ def changed_spots(files, src):
         for l in _pure_inserts(fc):
             spots |= {l, l - 1}
         for l in spots:
-            inner = [n for n in fns if n.lineno <= l <= n.end_lineno]
+            inner = [n for n in fns if _start(n) <= l <= n.end_lineno]
             if not inner:
-                elsewhere = True
+                kind = _outside_function(tree, l)
+                if kind is None:
+                    return None
+                elsewhere |= kind == "setting"
                 continue
-            fn = max(inner, key=lambda n: n.lineno)
-            if any(isinstance(n, ast.Lambda) and n.lineno == n.end_lineno for n in inner):
-                # code inside a one-line lambda: neither the import diff (a function's
-                # fingerprint leaves out its code) nor the call recording sees it
+            if any(isinstance(n, ast.Lambda) for n in inner):
                 return None
-            first = fn.body.lineno if isinstance(fn, ast.Lambda) else fn.body[0].lineno
-            if l < first or (isinstance(fn, ast.Lambda) and l == fn.lineno and fn.lineno == fn.end_lineno):
-                elsewhere = True
-                continue
+            fn = max(inner, key=_start)
+            if l < _start(fn.body[0]):
+                return None
             body.setdefault(p, set()).add(l)
     return body, elsewhere
 
