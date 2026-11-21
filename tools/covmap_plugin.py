@@ -31,6 +31,8 @@ def _rel(p):
 
 def on_line(code, line):
     fn = code.co_filename
+    if PKG is None:  # interpreter shutdown
+        return
     if not (fn.startswith(PKG) or fn.startswith(TESTS)):
         return mon.DISABLE
     key = (_rel(fn), line)
@@ -141,17 +143,14 @@ class InlineExecutor:
     def __exit__(self, *a):
         pass
 
-def pytest_configure(config):
-    import concurrent.futures
-    concurrent.futures.ProcessPoolExecutor = InlineExecutor
+def start(pystart_only=False, attrs=True):
+    """Start recording, then import all of sqlglot into the 'import' bucket.
+    Shared by this plugin and blast/tpcmap.py."""
     mon.use_tool_id(TOOL, "covmap")
     mon.register_callback(TOOL, mon.events.LINE, on_line)
     mon.register_callback(TOOL, mon.events.PY_START, on_start)
-    if os.environ.get("COVMAP_PYSTART_ONLY") == "1":
-        # only the one-line functions (tools/lambda_lines.py patches them into a map)
-        mon.set_events(TOOL, mon.events.PY_START)
-    else:
-        mon.set_events(TOOL, mon.events.LINE | mon.events.PY_START)
+    # pystart_only: just the one-line functions (tools/lambda_lines.py patches them into a map)
+    mon.set_events(TOOL, mon.events.PY_START if pystart_only else mon.events.LINE | mon.events.PY_START)
     builtins.open = rec_open
     io.open = rec_open
     # 'import' = lines run while sqlglot itself is imported (every module, so lazy
@@ -170,9 +169,15 @@ def pytest_configure(config):
         except Exception as e:
             print("covmap: import fail", m.name, e, file=sys.stderr)
     state["cur"] = None
-    if os.environ.get("COVMAP_ATTRS", "1") == "1":
+    if attrs:
         wrap_class_attrs()
     snapshot_globals()
+
+
+def pytest_configure(config):
+    import concurrent.futures
+    concurrent.futures.ProcessPoolExecutor = InlineExecutor
+    start(os.environ.get("COVMAP_PYSTART_ONLY") == "1", os.environ.get("COVMAP_ATTRS", "1") == "1")
 
 
 @pytest.hookimpl(hookwrapper=True)

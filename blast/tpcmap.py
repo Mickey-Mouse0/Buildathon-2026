@@ -90,31 +90,9 @@ def build_map(src, out):
     os.environ["COVMAP_ROOT"] = src
     sys.path.insert(0, TOOLS)
     import covmap_plugin as P
-    import importlib
-    import pkgutil
 
     mon = P.mon
-    mon.use_tool_id(P.TOOL, "covmap")
-    mon.register_callback(P.TOOL, mon.events.LINE, P.on_line)
-    mon.register_callback(P.TOOL, mon.events.PY_START, P.on_start)
-    mon.set_events(P.TOOL, mon.events.LINE | mon.events.PY_START)
-    import builtins
-    import io
-
-    builtins.open = P.rec_open
-    io.open = P.rec_open
-    P.state["cur"] = P.importtime
-    import sqlglot
-
-    for m in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
-        if not m.name.endswith("__main__"):
-            try:
-                importlib.import_module(m.name)
-            except Exception:
-                pass
-    P.state["cur"] = None
-    P.wrap_class_attrs()
-    P.snapshot_globals()
+    P.start()
 
     result = {}
     for test_id in SUITES:
@@ -194,14 +172,15 @@ def check(src, expected_path):
             fixture, sqls, schema = suite(src, test_id)
             from sqlglot import find_tables, parse_one
 
-            names = set()
-            for q in queries:
-                if sqls[q][0].get("execute"):
-                    names |= {t.name for t in find_tables(parse_one(sqls[q][1]))}
-            tables = load_tables(src, fixture, schema, names)
-            pickle.loads(pickle.dumps((schema, tables)))
+            # queries come cheapest first; tables load as a query first needs them, so a
+            # patch that changes an early query's result stops the check before the rest
+            tables = {}
             for q in queries:
                 meta, sql, _ = sqls[q]
+                if meta.get("execute"):
+                    need = {t.name for t in find_tables(parse_one(sql))} - tables.keys()
+                    if need:
+                        tables.update(pickle.loads(pickle.dumps(load_tables(src, fixture, schema, need))))
                 res, duck = run_query(meta, sql, schema, tables)
                 exp_ = expected[test_id][q]
                 if res != exp_["result"] or duck != exp_["duckdb"]:

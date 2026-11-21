@@ -78,6 +78,33 @@ class Maps:
         return out
 
 
+def same_module(old, oldt, new, newt):
+    """ast.dump(oldt) == ast.dump(newt), without dumping all of a 9,000-line file:
+    statements whose source text is unchanged parse the same, so only the others are
+    compared, descending into class and function bodies."""
+    ol, nl = old.splitlines(), new.splitlines()
+
+    def text(lines, st):
+        start = st.decorator_list[0].lineno if getattr(st, "decorator_list", None) else st.lineno
+        return lines[start - 1:st.end_lineno]
+
+    def same_body(xs, ys):
+        return len(xs) == len(ys) and all(same(x, y) for x, y in zip(xs, ys))
+
+    def same(x, y):
+        if text(ol, x) == text(nl, y):
+            return True
+        if type(x) is not type(y):
+            return False
+        if isinstance(x, (ast.ClassDef,) + FUNC):
+            hx = ast.dump(type(x)(**{**{f: getattr(x, f) for f in x._fields}, "body": []}))
+            hy = ast.dump(type(y)(**{**{f: getattr(y, f) for f in y._fields}, "body": []}))
+            return hx == hy and same_body(x.body, y.body)
+        return ast.dump(x) == ast.dump(y)
+
+    return same_body(oldt.body, newt.body)
+
+
 def stmt_chain(tree, line):
     """Statements (outermost first) whose span holds the line."""
     chain = []
@@ -366,7 +393,7 @@ class Analyzer:
         except SyntaxError:
             notes.append("syntax error")
             return None
-        if ast.dump(oldt) == ast.dump(newt):
+        if same_module(old, oldt, new, newt):
             notes.append(f"no-op {path}")
             return set()
         changed = set(fc.removed_lines())

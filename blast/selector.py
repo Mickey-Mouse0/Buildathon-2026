@@ -295,7 +295,7 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
             log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: no query reaches the change")
             drop.add(n)
             continue
-        jobs[test_id] = sorted(q)
+        jobs[test_id] = sorted(q, key=lambda i: (cpu[test_id][i], i))
         est += sum(cpu[test_id][i] for i in q)
     if jobs:
         rest = [x for x in chosen if x not in drop]
