@@ -22,7 +22,7 @@ opened = {}
 attrs = {}
 mro = {}
 importtime = set()
-class_bucket = {}
+scope_bucket = {}
 _open = builtins.open
 _io_open = io.open
 
@@ -124,10 +124,9 @@ def pytest_configure(config):
     mon.set_events(TOOL, mon.events.LINE)
     builtins.open = rec_open
     io.open = rec_open
-    state["cur"] = importtime  # everything run while collecting counts as import time
-
-def pytest_collection_finish(session):
-    # import every sqlglot module up front so lazy import work lands in 'import'
+    # 'import' = lines run while sqlglot itself is imported (every module, so lazy
+    # dialect loading lands here too). Test modules are collected afterwards, each
+    # into its own bucket that is credited to that file's tests.
     import sqlglot
     state["cur"] = importtime
     for m in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
@@ -141,6 +140,21 @@ def pytest_collection_finish(session):
     if os.environ.get("COVMAP_ATTRS", "1") == "1":
         wrap_class_attrs()
     snapshot_globals()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector):
+    if not isinstance(collector, pytest.Module):
+        yield
+        return
+    b = scope_bucket.setdefault(collector.nodeid, [set(), set(), set()])
+    state["cur"], state["opened"], state["attrs"] = b
+    mon.restart_events()
+    try:
+        yield
+    finally:
+        state["cur"], state["opened"], state["attrs"] = None, None, None
+        mon.restart_events()
 
 
 _snapshots = []
@@ -176,15 +190,15 @@ def pytest_fixture_setup(fixturedef, request):
     if fixturedef.scope == "function":
         yield
         return
-    key = request.node.nodeid if fixturedef.scope == "class" else "__" + fixturedef.scope
-    prev, prevo, preva = state["cur"], state.get("opened"), state.get("attrs")
-    b = class_bucket.setdefault(key, [set(), set(), set()])
-    state["cur"], state["opened"], state["attrs"] = b[0], b[1], b[2]
+    key = request.node.nodeid  # the class, module or session the fixture belongs to
+    prev = state["cur"], state.get("opened"), state.get("attrs")
+    b = scope_bucket.setdefault(key, [set(), set(), set()])
+    state["cur"], state["opened"], state["attrs"] = b
     mon.restart_events()
     try:
         yield
     finally:
-        state["cur"], state["opened"], state["attrs"] = prev, prevo, preva
+        state["cur"], state["opened"], state["attrs"] = prev
         mon.restart_events()
 
 @pytest.hookimpl(hookwrapper=True)
@@ -195,14 +209,12 @@ def pytest_runtest_protocol(item, nextitem):
     mon.restart_events()
     yield
     state["cur"], state["opened"], state["attrs"] = None, None, None
-    cls = item.getparent(pytest.Class)
-    if cls is not None and cls.nodeid in class_bucket:
-        s |= class_bucket[cls.nodeid][0]
-        o |= class_bucket[cls.nodeid][1]
-        a |= class_bucket[cls.nodeid][2]
-    for k in ("__session", "__module", "__package"):
-        if k in class_bucket:
-            a |= class_bucket[k][2]
+    for node in item.listchain():
+        b = scope_bucket.get(node.nodeid)
+        if b is not None:
+            s |= b[0]
+            o |= b[1]
+            a |= b[2]
     per_test[item.nodeid] = s
     attrs[item.nodeid] = a
     opened[item.nodeid] = o

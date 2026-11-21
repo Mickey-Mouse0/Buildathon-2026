@@ -209,7 +209,25 @@ class Analyzer:
                         if fn.decorator_list and start <= l < fn.lineno:
                             notes.append("decorator")
                     continue
-                out |= m.lines(path, header_lines(chain[-1]))
+                own = header_lines(chain[-1])
+                imp = m.importtime.get(path, ())
+                if any(x in imp for x in own):
+                    # This code runs while sqlglot is imported (metaclasses, table
+                    # builders, helpers called from class bodies), so what it computes
+                    # is baked in before any test starts and per-test coverage can't
+                    # see who depends on it.
+                    outer = next(s for s in chain if isinstance(s, FUNC))
+                    nested = [n for n in ast.walk(outer) if n is not outer and isinstance(n, FUNC + (ast.Lambda,))]
+                    if outer.name.startswith("__") or not nested or any(
+                        n.lineno <= l <= n.end_lineno for n in nested
+                    ):
+                        notes.append(f"runs at import: {fn.name}")
+                        return None
+                    # A factory: what it builds lives on in the functions it returns.
+                    out |= m.func_range(path, outer.lineno, outer.end_lineno)
+                    notes.append(f"factory {outer.name}")
+                    continue
+                out |= m.lines(path, own)
                 notes.append(f"body {fn.name}")
                 continue
             st = chain[-1]
