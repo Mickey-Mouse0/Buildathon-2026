@@ -18,6 +18,7 @@ from analyze import Analyzer, Maps  # noqa: E402
 DATA = Path(os.environ.get("BLAST_DATA", "/data"))
 SRC = os.environ.get("BLAST_SQLGLOT", "/opt/sqlglot")
 MAP = os.environ.get("BLAST_MAP", str(HERE / "covmap.pkl.gz"))
+PROVER_DATA = Path(os.environ.get("BLAST_PROVER_DATA", str(HERE / "prover_data")))
 WORKER_MS = 2000
 MAX_WORKERS = 8
 
@@ -58,6 +59,15 @@ def main():
     except Exception as e:
         log("map failed to load, running everything:", repr(e))
         analyzer = None
+    prover = None
+    try:
+        sys.path.insert(0, str(HERE / "prover"))
+        from prove import load_packaged
+
+        prover = load_packaged(PROVER_DATA, SRC, tests)
+        log(f"prover loaded for {len(prover.heavy)} heavy tests")
+    except Exception as e:
+        log("prover failed to load, using the selector alone:", repr(e))
     total = 0
     for patch in sorted((DATA / "commits").glob("*.patch")):
         cid = patch.stem
@@ -72,6 +82,19 @@ def main():
         except Exception as e:
             log(cid, "error, running everything:", repr(e))
             chosen = every
+        if prover is not None and chosen:
+            try:
+                verdict = prover.verdict(patch.read_text(errors="replace"))
+                if verdict["noop"]:
+                    log(cid, "prover: commit changes nothing")
+                    chosen = []
+                else:
+                    dropped = [n for n in chosen if n in verdict["safe"]]
+                    chosen = [n for n in chosen if n not in verdict["safe"]]
+                    if dropped:
+                        log(cid, "prover dropped", dropped)
+            except Exception as e:
+                log(cid, "prover error, keeping the selector's tests:", repr(e))
         workers = pack(chosen, ms)
         if workers:
             total += max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)

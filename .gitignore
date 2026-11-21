@@ -1,2 +1,4 @@
 output.jsonl
 __pycache__/
+build/
+blast/prover_data/profiles.pkl
