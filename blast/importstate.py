@@ -85,7 +85,13 @@ class _Canon:
         if isinstance(v, (set, frozenset)):
             return _h(t.__name__, b"".join(sorted(self(x) for x in v)))
         if isinstance(v, type):
-            return _h("cls", v.__module__, v.__qualname__)
+            if _named(v):
+                return _h("cls", v.__module__, v.__qualname__)
+            # Built at import and only reachable through this reference, e.g. the
+            # Tokenizer class Dialect's metaclass makes for a dialect without its own.
+            # Its settings are listed nowhere else, so they count as part of the value.
+            fields = {k: x for k, x in v.__dict__.items() if k not in _SKIP}
+            return _h("dyncls", v.__module__, v.__qualname__, self(v.__bases__), self(fields))
         if isinstance(v, types.ModuleType):
             return _h("mod", v.__name__)
         if isinstance(v, types.MethodType):
@@ -124,6 +130,17 @@ class _Canon:
             self.opaque = True
             return _h(OPAQUE, t.__module__, t.__qualname__)
         return _h("repr", t.__module__, t.__qualname__, r)
+
+
+_SKIP = ("__dict__", "__weakref__", "__doc__", "__module__", "__qualname__", "__firstlineno__", "__static_attributes__")
+
+
+def _named(cls):
+    """Is the class reachable as module.Qual.Name, so snapshot() lists it itself?"""
+    obj = sys.modules.get(cls.__module__)
+    for part in cls.__qualname__.split("."):
+        obj = getattr(obj, part, None) if obj is not None else None
+    return obj is cls
 
 
 def _digest(canon, v):
@@ -191,7 +208,7 @@ def snapshot():
                     cls = stack.pop()
                     qual = f"{modname}:{cls.__qualname__}"
                     for an, av in list(cls.__dict__.items()):
-                        if an in ("__dict__", "__weakref__", "__doc__", "__module__", "__qualname__", "__firstlineno__", "__static_attributes__"):
+                        if an in _SKIP:
                             continue
                         if isinstance(av, type) and av.__module__ == modname and av.__qualname__ == f"{cls.__qualname__}.{an}":
                             stack.append(av)

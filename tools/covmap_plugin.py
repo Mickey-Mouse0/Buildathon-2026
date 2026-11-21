@@ -127,8 +127,11 @@ def pytest_configure(config):
     # 'import' = lines run while sqlglot itself is imported (every module, so lazy
     # dialect loading lands here too). Test modules are collected afterwards, each
     # into its own bucket that is credited to that file's tests.
-    import sqlglot
+    # cur must be set before the first sqlglot import: a line reports once and then
+    # stays quiet until the next restart_events, so anything run while cur is None
+    # (e.g. __init_subclass__ bodies) would be recorded nowhere.
     state["cur"] = importtime
+    import sqlglot
     for m in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
         if m.name.endswith("__main__"):
             continue
