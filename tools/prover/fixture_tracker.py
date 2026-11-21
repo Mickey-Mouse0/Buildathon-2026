@@ -14,15 +14,23 @@ _real_open = builtins.open
 _real_io_open = io.open
 
 
+_outside = set()
+_ALL_PHASES = os.environ.get("FIXTURE_TRACKER_ALL_PHASES") == "1"
+
+
 def _record(path):
-    if _current is None:
+    if _current is None and not _ALL_PHASES:
         return
     try:
         p = os.path.realpath(os.fspath(path))
     except TypeError:
         return
     if "/tests/" in p:
-        _opened.setdefault(_current, set()).add(p.split("/tests/", 1)[1])
+        relative = p.split("/tests/", 1)[1]
+        if _current is None:
+            _outside.add(relative)
+        else:
+            _opened.setdefault(_current, set()).add(relative)
 
 
 def _open(file, *a, **k):
@@ -130,3 +138,11 @@ def pytest_runtest_protocol(item, nextitem):
             sorted(_dialects.pop(item.nodeid, ())),
         ]
         f.write(json.dumps(record) + "\n")
+
+
+def pytest_sessionfinish(session):
+    if _ALL_PHASES:
+        out = os.environ["FIXTURE_TRACKER_OUT"]
+        os.makedirs(out, exist_ok=True)
+        with _real_open(os.path.join(out, f"{os.getpid()}.outside"), "w") as f:
+            f.write("\n".join(sorted(_outside)))
