@@ -99,6 +99,15 @@ def cost(numbers, ms):
 
 
 _baseline = []
+# The scorer stops us after 3 minutes of wall time. The child-process checks are
+# optional, so they stop starting once a share of that is gone, and a child that
+# runs long is cut off (its commit then keeps its tests).
+_T0 = time.monotonic()
+CHECK_DEADLINE_S = 110
+
+
+def _time_left():
+    return CHECK_DEADLINE_S - (time.monotonic() - _T0)
 
 
 def import_diff(analyzer, files, notes):
@@ -124,9 +133,12 @@ def import_diff(analyzer, files, notes):
             return None
         overlay[fc.new_path] = new
     # the same hash seed as the build-time snapshot, so sets of strings line up
+    if _time_left() < 5:
+        notes.append("import diff skipped: out of time")
+        return None
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONHASHSEED="0")
     r = subprocess.run([sys.executable, str(HERE / "importstate.py"), "patched", SRC],
-                       input=pickle.dumps(overlay), capture_output=True, env=env, timeout=60)
+                       input=pickle.dumps(overlay), capture_output=True, env=env, timeout=min(30, _time_left()))
     if r.returncode != 0:
         notes.append(f"import diff failed: {r.stderr.decode(errors='replace')[-200:]}")
         return None
@@ -182,6 +194,8 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
         # with a margin over what dropping them would save
         if (est + 0.5) * 1000 >= 0.8 * gain:
             log(cid, f"tpc check skipped: ~{est:.1f}s of queries for {gain / 1000:.1f}s")
+        elif _time_left() < 3 * est + 10:
+            log(cid, f"tpc check skipped: out of time ({_time_left():.0f}s left, ~{est:.1f}s of queries)")
         else:
             overlay = {}
             for fc in files:
@@ -205,7 +219,7 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
                 env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SKIP_INTEGRATION="0")
                 r = subprocess.run([sys.executable, str(HERE / "tpcmap.py"), "check", SRC, TPC_EXPECTED],
                                    input=pickle.dumps({"overlay": overlay, "jobs": jobs}),
-                                   capture_output=True, env=env, timeout=120)
+                                   capture_output=True, env=env, timeout=_time_left())
                 verdict = pickle.loads(r.stdout) if r.returncode == 0 else {}
                 for test_id, qs in jobs.items():
                     ok = verdict.get(test_id, False)
