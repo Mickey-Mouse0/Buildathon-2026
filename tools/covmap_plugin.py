@@ -140,6 +140,36 @@ def pytest_collection_finish(session):
     state["cur"] = None
     if os.environ.get("COVMAP_ATTRS", "1") == "1":
         wrap_class_attrs()
+    snapshot_globals()
+
+
+_snapshots = []
+
+
+def snapshot_globals():
+    """Remember every module-level dict/list/set in sqlglot as it is after import.
+
+    Some of them are per-process caches (generator._DISPATCH_CACHE). Without a reset,
+    the code that fills a cache is only recorded for the first test that runs it, so a
+    change there would map to one test instead of every test that relies on it.
+    """
+    for modname, mod in list(sys.modules.items()):
+        if not (modname == "sqlglot" or modname.startswith("sqlglot.")):
+            continue
+        for name, val in list(vars(mod).items()):
+            if type(val) in (dict, list, set):
+                _snapshots.append((val, val.copy()))
+    print("covmap: snapshotted", len(_snapshots), "module containers", file=sys.stderr)
+
+
+def reset_globals():
+    for val, saved in _snapshots:
+        if len(val) != len(saved):
+            if isinstance(val, list):
+                val[:] = saved
+            else:
+                val.clear()
+                val.update(saved)
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_fixture_setup(fixturedef, request):
@@ -159,6 +189,7 @@ def pytest_fixture_setup(fixturedef, request):
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_protocol(item, nextitem):
+    reset_globals()
     s, o, a = set(), set(), set()
     state["cur"], state["opened"], state["attrs"] = s, o, a
     mon.restart_events()
