@@ -93,3 +93,19 @@ def find_targets(tree):
             continue
         roots.append(node)
     return roots, conditions
+
+
+def compare_nodes(root):
+    if not isinstance(root, OPERATOR_NODES):
+        return []
+    out = []
+
+    def walk(node):
+        if isinstance(node, ast.Compare) and len(node.ops) == 1:
+            out.append(node)
+        for child in operator_children(node):
+            if isinstance(child, OPERATOR_NODES):
+                walk(child)
+
+    walk(root)
+    return out
