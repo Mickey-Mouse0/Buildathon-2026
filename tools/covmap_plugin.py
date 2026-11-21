@@ -42,6 +42,31 @@ def on_line(code, line):
         cur.add(key)
     return mon.DISABLE
 
+_one_line = {}
+
+
+def _single_line(code):
+    hit = _one_line.get(code)
+    if hit is None:
+        ls = {l for _, _, l in code.co_lines() if l is not None}
+        hit = _one_line[code] = len(ls) == 1
+    return hit
+
+
+def on_start(code, offset):
+    """A function whose code sits on one line (lambda x: ..., and generator
+    expressions inside it) raises no LINE event at all, so its line would only ever
+    show as run at import. Credit that line when the function starts instead."""
+    fn = code.co_filename
+    if PKG is None:  # interpreter shutdown
+        return
+    if (fn.startswith(PKG) or fn.startswith(TESTS)) and code.co_flags & CO_NEWLOCALS and _single_line(code):
+        cur = state["cur"]
+        if cur is not None and cur is not importtime:
+            cur.add((_rel(fn), code.co_firstlineno))
+    return mon.DISABLE
+
+
 class Rec:
     """Wraps a plain class attribute so reads are recorded per test."""
     __slots__ = ("v", "k")
@@ -121,7 +146,12 @@ def pytest_configure(config):
     concurrent.futures.ProcessPoolExecutor = InlineExecutor
     mon.use_tool_id(TOOL, "covmap")
     mon.register_callback(TOOL, mon.events.LINE, on_line)
-    mon.set_events(TOOL, mon.events.LINE)
+    mon.register_callback(TOOL, mon.events.PY_START, on_start)
+    if os.environ.get("COVMAP_PYSTART_ONLY") == "1":
+        # only the one-line functions (tools/lambda_lines.py patches them into a map)
+        mon.set_events(TOOL, mon.events.PY_START)
+    else:
+        mon.set_events(TOOL, mon.events.LINE | mon.events.PY_START)
     builtins.open = rec_open
     io.open = rec_open
     # 'import' = lines run while sqlglot itself is imported (every module, so lazy

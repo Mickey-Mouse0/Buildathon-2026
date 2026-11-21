@@ -96,7 +96,8 @@ def build_map(src, out):
     mon = P.mon
     mon.use_tool_id(P.TOOL, "covmap")
     mon.register_callback(P.TOOL, mon.events.LINE, P.on_line)
-    mon.set_events(P.TOOL, mon.events.LINE)
+    mon.register_callback(P.TOOL, mon.events.PY_START, P.on_start)
+    mon.set_events(P.TOOL, mon.events.LINE | mon.events.PY_START)
     import builtins
     import io
 
