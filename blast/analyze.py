@@ -491,6 +491,12 @@ class Analyzer:
                     # A factory: what it builds lives on in the functions it returns.
                     out |= m.func_range(path, outer.lineno, outer.end_lineno)
                     notes.append(f"factory {outer.name}")
+                    # Having a nested lambda doesn't make it a factory: an ordinary method
+                    # that runs at import (the parser, from a generator's class body) can
+                    # raise there or bake a different result into a class.
+                    if not self.import_diff:
+                        return None
+                    self.defer(f"import-time code in {outer.name}", None, notes)
                     continue
                 out |= m.lines(path, own)
                 notes.append(f"body {fn.name}")
