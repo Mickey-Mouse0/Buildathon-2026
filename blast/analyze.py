@@ -363,7 +363,31 @@ class Analyzer:
         out = set()
         modname = path[:-3].replace("/", ".").removesuffix(".__init__")
         gnames = getattr(m, "gnames", None)
+        wn = getattr(m, "wnames", None) or {}
+        fimp, attr = wn.get("<fromimports>"), wn.get("<attr>", {})
+
+        def reach(f, key):
+            """Can code in file f see this module's binding of n? Only through
+            `from <module> import n` (or *), or as an attribute / a string. In the
+            import diff every module's binding is an entry of its own, so a bare n
+            elsewhere is that module's own (it changes there if its value does)."""
+            if fimp is None:
+                return True
+            fi = fimp.get(f)
+            if fi is None or (modname, n) in fi or (modname, "*") in fi:
+                return True
+            return key is not None and key in attr.get(n, ())
+
         for n in names:
+            if funcs_only:
+                lams = wn.get("<lambdas>")
+                if lams is None:
+                    funcs_only = False  # an older map: follow class bodies as before
+                else:
+                    # lambdas in class or module bodies read n when called
+                    for f, a, b, as_attr in lams.get(n, ()):
+                        if f == path or as_attr or reach(f, None):
+                            out |= m.lines(f, range(a, b + 1))
             g = gnames.get(n, frozenset()) if gnames is not None else None
             for e in m.names.get(n, ()):
                 if own_file and e[1] != (modname if e[0] == "classbody" else path):
@@ -371,6 +395,8 @@ class Analyzer:
                 if e[0] == "func":
                     if g is not None and (e[1], e[2]) not in g:
                         continue  # mentions it only as self.x / param.x: not this global
+                    if funcs_only and e[1] != path and not reach(e[1], (e[1], e[2])):
+                        continue  # another module's own binding of the same name
                     out |= m.func_range(e[1], e[2], e[4])
                 elif funcs_only:
                     continue

@@ -70,6 +70,9 @@ def name_index(src):
     gidx = defaultdict(set)
     widx = defaultdict(set)
     aidx = defaultdict(set)
+    xidx = defaultdict(set)
+    lidx = defaultdict(set)
+    fimp = {}
     # tests/ too: a test can read a module constant directly (test_typing reads
     # every typing module's EXPRESSION_METADATA through importlib)
     walk = [w for top in ("sqlglot", "tests") for w in os.walk(os.path.join(src, top))]
@@ -85,6 +88,7 @@ def name_index(src):
             modname = path[:-3].replace("/", ".").removesuffix(".__init__")
             imported = {(a.asname or a.name).split(".")[0] for n in ast.walk(tree)
                         if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+            fimp[path] = frozenset(from_imports(tree, modname, path.endswith("__init__.py")))
 
             def visit(body, qual, inclass):
                 for st in body:
@@ -103,6 +107,8 @@ def name_index(src):
                             idx[nm].append(entry)
                         for nm in global_mentions(st, imported):
                             gidx[nm].add((path, start))
+                        for nm in global_mentions(st, imported, bare=False):
+                            xidx[nm].add((path, start))
                         for nm in whole_mentions(st):
                             widx[nm].add((path, start))
                     elif isinstance(st, ast.ClassDef):
@@ -110,6 +116,13 @@ def name_index(src):
                     else:
                         for a, b in aliases_of(st):
                             aidx[a].add(b)
+                        # a lambda here (a TRANSFORMS / FUNCTIONS entry) reads names when
+                        # it is called, not at import
+                        for lam in ast.walk(st):
+                            if isinstance(lam, ast.Lambda):
+                                attr = global_mentions(lam, imported, bare=False)
+                                for nm in global_mentions(lam, imported):
+                                    lidx[nm].add((path, lam.lineno, lam.end_lineno, nm in attr))
                         val = getattr(st, "value", None)
                         refs = frozenset(refs_of(val)) if val is not None else frozenset(refs_of(st))
                         names = {n for _, n in refs}
@@ -123,6 +136,9 @@ def name_index(src):
             visit(tree.body, [], False)
     wnames = {k: frozenset(v) for k, v in widx.items()}
     wnames["<aliases>"] = {k: frozenset(v) for k, v in aidx.items()}
+    wnames["<attr>"] = {k: frozenset(v) for k, v in xidx.items()}
+    wnames["<fromimports>"] = fimp
+    wnames["<lambdas>"] = {k: frozenset(v) for k, v in lidx.items()}
     return dict(idx), {k: frozenset(v) for k, v in gidx.items()}, wnames
 
 
@@ -179,13 +195,32 @@ def whole_mentions(fn):
     return out
 
 
-def global_mentions(fn, imported=frozenset()):
+def from_imports(tree, modname, is_pkg):
+    """(module, name) for every `from module import name` in a file (name "*" for a
+    star import), relative imports resolved."""
+    out = set()
+    pkg = modname if is_pkg else modname.rpartition(".")[0]
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom):
+            if n.level:
+                base = pkg.split(".")
+                base = base[:len(base) - (n.level - 1)] if n.level > 1 else base
+                mod = ".".join(base + ([n.module] if n.module else []))
+            else:
+                mod = n.module or ""
+            for a in n.names:
+                out.add((mod, a.name))
+    return out
+
+
+def global_mentions(fn, imported=frozenset(), bare=True):
     """Names a function mentions in a way that could read a module global: a bare
     name, a string (getattr, importlib), or an attribute of anything except self,
     cls, a parameter or a local that plain assignments bind to a non-module value
     (dialect.EXPRESSION_METADATA reads the Dialect class setting, which the import
     diff tracks, not the typing module's dict of that name). A name that is also
-    imported, or bound any other way (for, with, global, ...), still counts."""
+    imported, or bound any other way (for, with, global, ...), still counts.
+    bare=False: leave out plain names (only attribute and string mentions)."""
     ok, bad = {"self", "cls"}, set(imported)
     for n in ast.walk(fn):
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
@@ -207,7 +242,8 @@ def global_mentions(fn, imported=frozenset()):
     out = set()
     for n in ast.walk(fn):
         if isinstance(n, ast.Name):
-            out.add(n.id)
+            if bare:
+                out.add(n.id)
         elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.isidentifier():
             out.add(n.value)
         elif isinstance(n, ast.Attribute):
