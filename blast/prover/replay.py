@@ -3,7 +3,7 @@ import enum
 import math
 import operator
 
-from targets import OPERATOR_NODES, leaves_of
+from targets import OPERATOR_NODES, compare_nodes, leaves_of
 from values import MISSING, Opaque
 
 PURE_CALLS = {"isinstance", "issubclass", "len", "type", "bool", "callable", "hasattr"}
@@ -141,10 +141,27 @@ def unary(op, a):
     raise Unknown("unary")
 
 
+RELATION_INDEX = {ast.Is: 0, ast.IsNot: 1, ast.Eq: 2, ast.NotEq: 3, ast.Lt: 4, ast.LtE: 5, ast.Gt: 6, ast.GtE: 7, ast.In: 8, ast.NotIn: 9}
+
+
+def compare_map(old_root, new_root):
+    old = {}
+    for k, cmp in enumerate(compare_nodes(old_root)):
+        old.setdefault((dump(cmp.left), dump(cmp.comparators[0])), k)
+    mapping = {}
+    for cmp in compare_nodes(new_root):
+        k = old.get((dump(cmp.left), dump(cmp.comparators[0])))
+        if k is not None:
+            mapping[id(cmp)] = k
+    return mapping
+
+
 class Evaluation:
-    def __init__(self, root, leaf_slots, record_leaves):
+    def __init__(self, root, leaf_slots, record_leaves, relations=None, compares=None):
         self.slots = leaf_slots
         self.record = record_leaves
+        self.relations = relations or {}
+        self.compares = compares or {}
         self.impure_trace = []
         self.full_trace = []
         self.pure = {id(leaf): is_pure(leaf) for leaf in leaves_of(root)}
@@ -173,6 +190,13 @@ class Evaluation:
                 if isinstance(node.op, ast.Or) and truth(value):
                     return value
             return value
+        if isinstance(node, ast.Compare) and id(node) in self.compares and self.compares[id(node)] in self.relations:
+            self.run(node.left)
+            self.run(node.comparators[0])
+            result = self.relations[self.compares[id(node)]][RELATION_INDEX[type(node.ops[0])]]
+            if result is MISSING:
+                raise Unknown("comparison raised or returned a non-bool when recorded")
+            return result
         if isinstance(node, ast.Compare):
             left = self.run(node.left)
             result = True
@@ -224,7 +248,11 @@ def prove_expression(old_root, new_root, condition, records):
     old_ids, new_candidates = slot_map(old_root, new_root)
     if old_ids is None:
         return False, "new expression uses a leaf the old one did not have"
-    for record_leaves, recorded_result in records:
+    old_compares = compare_map(old_root, old_root)
+    new_compares = compare_map(old_root, new_root)
+    for record in records:
+        record_leaves, recorded_result = record[0], record[1]
+        relations = dict(record[2]) if len(record) > 2 else {}
         try:
             new_ids = {}
             for leaf_id, candidates in new_candidates.items():
@@ -234,11 +262,11 @@ def prove_expression(old_root, new_root, condition, records):
                     if not same(record_leaves[other], record_leaves[chosen], False):
                         raise Unknown("duplicate leaf took different values")
                 new_ids[leaf_id] = chosen
-            old_eval = Evaluation(old_root, old_ids, record_leaves)
+            old_eval = Evaluation(old_root, old_ids, record_leaves, relations, old_compares)
             old_value = old_eval.run(old_root)
             if not same(old_value, recorded_result, condition):
                 return False, "replay of the original disagrees with the recording"
-            new_eval = Evaluation(new_root, new_ids, record_leaves)
+            new_eval = Evaluation(new_root, new_ids, record_leaves, relations, new_compares)
             new_value = new_eval.run(new_root)
             if old_eval.impure_trace != new_eval.impure_trace:
                 return False, "side-effecting leaves evaluated differently"
