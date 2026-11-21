@@ -258,6 +258,39 @@ _tpc = []
 
 EXECUTOR_FILE = "tests/test_executor.py"
 
+TPCDS_SQL = "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql"
+TPCDS_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+# DuckDB, pandas and numpy, installed at build for blast/tpcquery.py only.
+TPC_DEPS = os.environ.get("BLAST_TPC_DEPS", "/opt/tpcdeps")
+# The check costs about 3 s of CPU plus the changed queries; ask for a clear margin.
+TPC_QUERY_MIN_GAIN_MS = 8000
+
+
+def tpc_query_edit(cid, files, chosen, ms, by_id):
+    """Drop test_execute_tpcds when a patch only edits queries in tpc-ds.sql and the
+    changed queries still pass the test's own comparison (blast/tpcquery.py)."""
+    n = by_id.get(TPCDS_TEST)
+    if n is None or n not in chosen or not os.path.isdir(TPC_DEPS):
+        return chosen
+    if len(files) != 1 or files[0].path != TPCDS_SQL or files[0].old_path != TPCDS_SQL or files[0].new_path != TPCDS_SQL:
+        return chosen
+    rest = [x for x in chosen if x != n]
+    gain = cost(chosen, ms) - cost(rest, ms)
+    if gain < TPC_QUERY_MIN_GAIN_MS or _time_left() < 45:
+        return chosen
+    with open(os.path.join(SRC, TPCDS_SQL), encoding="utf-8", newline="") as f:
+        new = files[0].apply(f.read())
+    if new is None or "\ufffd" in new:
+        return chosen
+    try:
+        r = subprocess.run([sys.executable, str(HERE / "tpcquery.py"), SRC, TPC_DEPS], input=pickle.dumps({"text": new}),
+                           capture_output=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"), timeout=30)
+        verdict = pickle.loads(r.stdout) if r.returncode == 0 else {"ok": False, "why": "check failed to run"}
+    except subprocess.TimeoutExpired:
+        verdict = {"ok": False, "why": "timed out"}
+    log(cid, f"tpc query edit: {verdict['why']}; {'dropped test_execute_tpcds' if verdict['ok'] else 'kept'}")
+    return rest if verdict["ok"] is True else chosen
+
 
 def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
     """Drop a TPC executor test when the queries the patch reaches all give the
@@ -484,6 +517,11 @@ def main():
                 chosen = tpc_check(cid, analyzer, files, text, chosen, ms, by_id)
             except Exception as e:
                 log(cid, "tpc check error, keeping the tests:", repr(e))
+        if chosen and files is not None:
+            try:
+                chosen = tpc_query_edit(cid, files, chosen, ms, by_id)
+            except Exception as e:
+                log(cid, "tpc query edit error, keeping the tests:", repr(e))
         workers = pack(chosen, ms)
         if workers:
             total += max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)

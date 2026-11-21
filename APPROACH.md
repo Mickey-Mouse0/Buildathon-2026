@@ -167,3 +167,15 @@ Two cases where `test_execute_tpcds` (21.5 s) or `test_execute_tpch` was kept fo
 
 Checked in the scorer's image on 8 stand-in sets (240 commits, labeled by running the selected tests): 3 commits change, 0 misses, and the three dropped tests pass when run on the patched code.
 
+## Edited TPC-DS queries
+
+An edit to a query in `tpc-ds.sql` used to keep `test_execute_tpcds` (21.5 s), although most such edits still match DuckDB. The test handles each (meta, query) pair on its own, so pairs the edit leaves alone do what they did at the pinned commit. `blast/tpcquery.py` runs only the changed pairs, with the test module's own code: its `setUpClass`, the real loader on the patched file, `mp_execute` and `subtestHelper`. It costs about 3 s of CPU, and runs only for a patch that touches nothing but that file.
+
+Passing in our container must also mean passing where the answers were labeled, so the changed query must have only one possible output on any machine. `order_is_fixed` requires a plain SELECT built from the kinds of expression the pinned executed queries use, no window, no inner LIMIT, and an ORDER BY over output columns under which no two different rows tie, including the first row a LIMIT cuts off (it asks DuckDB for one more row). Anything else keeps the test.
+
+DuckDB, pandas and numpy are installed at build, at the locked versions, into `/opt/tpcdeps`, which only this check puts on its path. Nothing else in the image sees them.
+
+Checked in the scorer's image: samples unchanged, and on 8 stand-in sets 2 commits change (25.5 s to 4.2 s each) with 0 misses. `tools/tpc_query_bench.py` planted 43 edits and ran the real test for each: 37 the check called ok all pass, 6 it kept all fail.
+
+What it leans on: float sums that come out in a different order on another machine could still differ in their last bits. The unedited queries carry the same risk at the pinned commit.
+
