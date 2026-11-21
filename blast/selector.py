@@ -26,6 +26,9 @@ IMPORT_STATE = os.environ.get("BLAST_IMPORT_STATE", str(HERE / "importstate.pkl"
 KEYMAP = os.environ.get("BLAST_KEYMAP", str(HERE / "keymap.pkl.gz"))
 TOKREPLAY = os.environ.get("BLAST_TOKREPLAY", str(HERE / "tokreplay.pkl.xz"))
 TOKREPLAY_BASE = os.environ.get("BLAST_TOKREPLAY_BASE", str(HERE / "tokreplay_base.pkl"))
+# Off by default: in the image it costs about 0.35 s of CPU a commit and saved less than
+# that on every set we measured (samples, 30 full-suite commits, 309 planted bugs).
+TOKREPLAY_ON = os.environ.get("BLAST_TOKREPLAY_ON", "0") == "1"
 # Replay only when the tests it could drop are worth this many times its CPU.
 REPLAY_MARGIN = float(os.environ.get("BLAST_REPLAY_MARGIN", "1.5"))
 # Only pay for an import diff (~1 s of CPU) when its fallback would cost more than this.
@@ -389,7 +392,7 @@ def main():
             except Exception as e:
                 log("key map failed to load, using attribute reads:", repr(e))
         analyzer = Analyzer(maps, import_diff=os.path.exists(IMPORT_STATE), keyreads=keyreads)
-        if os.path.exists(IMPORT_STATE) and os.path.exists(TOKREPLAY) and os.path.exists(TOKREPLAY_BASE):
+        if TOKREPLAY_ON and os.path.exists(IMPORT_STATE) and os.path.exists(TOKREPLAY) and os.path.exists(TOKREPLAY_BASE):
             tok = []  # loaded the first time a patch could use it
     except Exception as e:
         log("map failed to load, running everything:", repr(e))
