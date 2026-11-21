@@ -328,6 +328,10 @@ class Prover:
 
     def discharge(self, test, change, owner, chain):
         profile = self.profiles[test]
+        if hasattr(profile, "part"):
+            # sharded profiles: the changed expression is in change.path, so that
+            # file's shard holds everything recorded about it
+            profile = profile.part(change.path)
         root = self.replay_root(change, chain)
 
         statement = next((n for n in reversed(chain) if isinstance(n, ast.stmt)), None)
@@ -393,8 +397,16 @@ def load_packaged(data_dir, sqlglot_dir, tests_list):
         "import_lines": heavy["import_lines"],
         "fixtures": {f: convert(v) for f, v in heavy["fixtures"].items()},
     }
-    with open(data_dir / "profiles.pkl", "rb") as f:
-        by_id = pickle.load(f)
+    shards = data_dir / "profiles.shards"
+    if shards.exists():
+        # split by sqlglot file at image build time (shard.py); a file's records
+        # load the first time a patch touches it
+        from shard import ShardedProfiles
+
+        by_id = ShardedProfiles(shards)
+    else:
+        with open(data_dir / "profiles.pkl", "rb") as f:
+            by_id = pickle.load(f)
     profiles = {number_of_id[i]: p for i, p in by_id.items() if i in number_of_id}
     with gzip.open(data_dir / "target_index.json.gz", "rt") as f:
         index = json.load(f)
