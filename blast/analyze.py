@@ -222,11 +222,16 @@ class Analyzer:
         return out
 
     # ---- module constants -----------------------------------------------
-    def module_global(self, path, names, notes, depth=0):
+    def module_global(self, path, names, notes, depth=0, own_file=False):
+        """own_file: only code in this module can see the name (a module object
+        bound by `import x`: nothing reaches it as othermodule.x)."""
         m = self.m
         out = set()
+        modname = path[:-3].replace("/", ".").removesuffix(".__init__")
         for n in names:
             for e in m.names.get(n, ()):
+                if own_file and e[1] != (modname if e[0] == "classbody" else path):
+                    continue
                 if e[0] == "func":
                     out |= m.func_range(e[1], e[2], e[4])
                 elif e[0] == "classbody":
@@ -240,6 +245,21 @@ class Analyzer:
                         out |= self.module_global(p, tg, notes, depth + 1)
         notes.append(f"global {','.join(sorted(names))}: {len(out)}")
         return out
+
+    def _star_imported(self, mod):
+        if not hasattr(self, "_stars"):
+            stars = set()
+            for top in ("sqlglot", "tests"):
+                for dp, _, fns in os.walk(os.path.join(self.m.src, top)):
+                    for fn in fns:
+                        if fn.endswith(".py"):
+                            with open(os.path.join(dp, fn), encoding="utf-8", errors="replace") as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if line.startswith("from ") and line.split("#")[0].rstrip().endswith("import *"):
+                                        stars.add(line.split()[1])
+            self._stars = stars
+        return mod in self._stars
 
     # ---- python source -----------------------------------------------------
     def python_file(self, fc, notes):
@@ -475,6 +495,10 @@ class Analyzer:
                     continue
                 if kinds == {"callable"} and ownfn:
                     continue  # a method's own def/body change: the line rules cover it
+                if kinds == {"callable"} and b is not None and b[2] and a is None:
+                    # a method written here was deleted: everything that called it ran
+                    # its lines, which the line rules already map
+                    continue
                 if "enum" in kinds:
                     notes.append(f"import diff: enum {ck}.{name}")
                     return None
@@ -491,7 +515,10 @@ class Analyzer:
                 path = mod.replace(".", "/") + ".py"
                 if not os.path.exists(os.path.join(m.src, path)):
                     path = mod.replace(".", "/") + "/__init__.py"
-                s = self.module_global(path, {name}, notes)
+                # a module bound by `import x` (added or dropped) is seen only by
+                # code in this file, unless another module star-imports this one
+                own = kinds == {"module"} and not self._star_imported(mod)
+                s = self.module_global(path, {name}, notes, own_file=own)
                 out |= s
         notes.append(f"import diff: {len(changed)} changed, {len(out)} tests")
         return out
