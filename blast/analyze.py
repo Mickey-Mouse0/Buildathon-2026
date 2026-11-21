@@ -36,18 +36,27 @@ TPC_SQL = {
     "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql": ("test_execute_tpcds",),
 }
 
+# Of those, the ones that ignore the expected side of each pair.
+TPC_EXECUTE_ONLY = ("test_execute_tpch", "test_execute_tpcds")
+
 
 def tpc_pairs_load(text):
     """What tests/helpers.load_sql_fixture_pairs does with a file's text, at the pinned
-    commit: raises exactly when it would raise inside setUpClass."""
+    commit: raises exactly when it would raise inside setUpClass. Returns the (meta,
+    sql) of each pair, which is all the execute tests read; the expected side is not."""
     statements = "\n".join(l for l in text.splitlines() if l and not l.startswith("--")).split(";")
+    pairs = []
     for i in range(0, len(statements), 2):
         if i + 1 < len(statements):
             lines = statements[i].strip().split("\n")
+            meta = {}
             j = 0
             while lines[j].startswith("#"):
                 key, val = lines[j].split(":", maxsplit=1)
+                meta[key.lstrip("#").strip()] = val.strip()
                 j += 1
+            pairs.append((list(meta.items()), "\n".join(lines[j:])))
+    return pairs
 
 
 class Maps:
@@ -236,14 +245,24 @@ class Analyzer:
         m = self.m
         try:
             with open(os.path.join(m.src, path), encoding="utf-8") as f:
-                new = fc.apply(f.read())
+                old = f.read()
+            new = fc.apply(old)
             if new is None or "\ufffd" in new:
                 return tests
-            tpc_pairs_load(new)
+            pairs = tpc_pairs_load(new)
         except Exception:
             notes.append("TPC file breaks setUpClass: whole class")
             return tests
         keep = {EXECUTOR + n for n in TPC_SQL[path]}
+        # The execute tests read only each pair's meta and query (mp_execute, then
+        # cached_execute on the same query). If every pair has the same ones, in the
+        # same order, the edit is on the expected side, which they never look at.
+        try:
+            if pairs == tpc_pairs_load(old):
+                keep -= {EXECUTOR + n for n in TPC_EXECUTE_ONLY}
+                notes.append("TPC file: queries unchanged, execute tests dropped")
+        except Exception:
+            pass
         out = {i for i in tests if not (m.tests[i].startswith(EXECUTOR) and m.tests[i] not in keep)}
         notes.append(f"TPC file: {len(tests) - len(out)} executor tests dropped")
         return out

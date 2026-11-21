@@ -157,3 +157,13 @@ All 24,768 distinct calls replay in about 16 s of CPU, so replay runs only when 
 ## Prover profiles split by file
 
 The heavy-test profiles (28 MB unpickled) used to load whole at startup, which also imports much of sqlglot: about 0.7 s of CPU on every run. The image build now regroups them by sqlglot file (`blast/prover/shard.py`), and the prover loads a file's shard the first time a patch changes an expression in it. Nothing is re-recorded: every record, overflow and raised entry is the same, only grouped by the file its expression is in. Startup CPU goes from about 1.2 s to about 0.4 s, with identical output on the samples.
+
+## TPC fixture rules
+
+Two cases where `test_execute_tpcds` (21.5 s) or `test_execute_tpch` was kept for nothing:
+
+- **An edit to the expected side of a TPC query file.** The execute tests read only each pair's meta and query; `test_optimized_tpch` is the one that reads the expected side. When the patched file gives the same (meta, query) pairs in the same order, the execute tests are dropped (`tpc_sql` in `blast/analyze.py`).
+- **A patch that also edits an unrelated data file.** The TPC check used to stand down whenever a patch touched anything outside `sqlglot/`. It now stands down only for a test file, a data file the coverage map doesn't know, or a data file the TPC test opens (class setup included).
+
+Checked in the scorer's image on 8 stand-in sets (240 commits, labeled by running the selected tests): 3 commits change, 0 misses, and the three dropped tests pass when run on the patched code.
+

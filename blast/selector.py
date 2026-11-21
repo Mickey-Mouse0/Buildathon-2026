@@ -264,8 +264,17 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
         return chosen
     # The check replays the queries and data as they were at build time, so it can't
     # judge an edit to a test or fixture file (a TPC query file edit changes the query).
-    if any(not fc.path.startswith("sqlglot/") for fc in files):
+    # A file outside sqlglot/ only matters to a TPC test that opens it. The coverage
+    # map lists who opens each data file (class setup included); a test file, or a
+    # data file the map doesn't know, could matter to anyone.
+    m = analyzer.m
+    others = [fc.path for fc in files if not fc.path.startswith("sqlglot/")]
+    if any(p.endswith(".py") or not p.startswith("tests/") or p not in m.open2t for p in others):
         return chosen
+    files = [fc for fc in files if fc.path.startswith("sqlglot/")]
+    if not files:
+        return chosen
+    index_of = {t: i for i, t in enumerate(m.tests)}
     if not _tpc:
         import gzip
 
@@ -275,11 +284,12 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
             cpu = {t: [r["cpu"] for r in rows] for t, rows in pickle.load(f).items()}
         _tpc.append((qmaps, cpu))
     qmaps, cpu = _tpc[0]
-    m = analyzer.m
     drop, jobs, est = set(), {}, 0.0
     for test_id, qm in qmaps.items():
         n = by_id.get(test_id)
         if n is None or n not in chosen:
+            continue
+        if test_id not in index_of or any(index_of[test_id] in m.open2t[p] for p in others):
             continue
         sub = Maps.__new__(Maps)
         sub.__dict__.update(m.__dict__)
