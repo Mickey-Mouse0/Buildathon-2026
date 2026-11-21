@@ -256,6 +256,9 @@ TPC_EXPECTED = os.environ.get("BLAST_TPC_EXPECTED", str(HERE / "tpc_expected.pkl
 _tpc = []
 
 
+EXECUTOR_FILE = "tests/test_executor.py"
+
+
 def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
     """Drop a TPC executor test when the queries the patch reaches all give the
     pinned commit's results (blast/tpcmap.py). Queries it doesn't reach can't
@@ -265,12 +268,24 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
     # The check replays the queries and data as they were at build time, so it can't
     # judge an edit to a test or fixture file (a TPC query file edit changes the query).
     # A file outside sqlglot/ only matters to a TPC test that opens it. The coverage
-    # map lists who opens each data file (class setup included); a test file, or a
-    # data file the map doesn't know, could matter to anyone.
+    # map lists who opens each data file (class setup included); a data file the map
+    # doesn't know could matter to anyone. A test module matters only if
+    # test_executor.py is it or imports it (conftest.py and __init__.py: always).
     m = analyzer.m
-    others = [fc.path for fc in files if not fc.path.startswith("sqlglot/")]
-    if any(p.endswith(".py") or not p.startswith("tests/") or p not in m.open2t for p in others):
+    others = sorted({p for fc in files for p in (fc.old_path, fc.new_path)
+                     if p is not None and not p.startswith("sqlglot/")})
+
+    def blocks(p):
+        if not p.startswith("tests/"):
+            return True
+        if p.endswith(".py"):
+            return (p == EXECUTOR_FILE or os.path.basename(p) in ("conftest.py", "__init__.py")
+                    or EXECUTOR_FILE in analyzer._test_importers(p))
+        return p not in m.open2t
+
+    if any(blocks(p) for p in others):
         return chosen
+    others = [p for p in others if not p.endswith(".py")]
     files = [fc for fc in files if fc.path.startswith("sqlglot/")]
     if not files:
         return chosen
