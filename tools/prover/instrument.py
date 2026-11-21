@@ -6,7 +6,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "blast" / "prover"))
 
-from targets import OPERATOR_NODES, find_targets, leaves_of, operator_children, target_key  # noqa: E402
+from targets import OPERATOR_NODES, compare_nodes, find_targets, leaves_of, operator_children, target_key  # noqa: E402
+
+
+FAMILY = {ast.Is: 0, ast.IsNot: 0, ast.Eq: 0, ast.NotEq: 0, ast.Lt: 1, ast.LtE: 1, ast.Gt: 1, ast.GtE: 1}
 
 
 def call(name, *args):
@@ -17,6 +20,25 @@ def wrap_leaves(root, number):
     if not isinstance(root, OPERATOR_NODES):
         return
     index = {id(leaf): i for i, leaf in enumerate(leaves_of(root))}
+    relate = {}
+    for k, cmp in enumerate(compare_nodes(root)):
+        left, right = cmp.left, cmp.comparators[0]
+        family = FAMILY.get(type(cmp.ops[0]))
+        if family is None:
+            continue
+        if id(left) in index and id(right) in index:
+            relate[id(right)] = (k, index[id(left)], family, None)
+        elif id(left) in index and isinstance(right, ast.Constant):
+            relate[id(left)] = (k, -1, family + 10, right.value)
+        elif isinstance(left, ast.Constant) and id(right) in index:
+            relate[id(right)] = (k, -1, family + 20, left.value)
+
+    def wrap(child):
+        if id(child) in relate:
+            k, left_slot, mode, const = relate[id(child)]
+            return call("__bpr__", ast.Constant(number), ast.Constant(index[id(child)]), child,
+                        ast.Constant(k), ast.Constant(left_slot), ast.Constant(mode), ast.Constant(const))
+        return call("__bpl__", ast.Constant(number), ast.Constant(index[id(child)]), child)
 
     def walk(node):
         for field, value in ast.iter_fields(node):
@@ -27,12 +49,12 @@ def wrap_leaves(root, number):
                     if isinstance(child, OPERATOR_NODES):
                         walk(child)
                     elif id(child) in index:
-                        value[position] = call("__bpl__", ast.Constant(number), ast.Constant(index[id(child)]), child)
+                        value[position] = wrap(child)
             elif isinstance(value, ast.expr) and any(value is c for c in operator_children(node)):
                 if isinstance(value, OPERATOR_NODES):
                     walk(value)
                 elif id(value) in index:
-                    setattr(node, field, call("__bpl__", ast.Constant(number), ast.Constant(index[id(value)]), value))
+                    setattr(node, field, wrap(value))
 
     walk(root)
 

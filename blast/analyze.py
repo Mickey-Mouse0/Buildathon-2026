@@ -20,6 +20,8 @@ import gzip
 import os
 import pickle
 
+from keyreads import dict_change
+
 FUNC = (ast.FunctionDef, ast.AsyncFunctionDef)
 DIALECT_DIRS = ("sqlglot.dialects.", "sqlglot.parsers.", "sqlglot.generators.",
                 "sqlglot.tokenizers.", "sqlglot.typing.")
@@ -122,8 +124,9 @@ def targets_of(st):
 
 
 class Analyzer:
-    def __init__(self, maps, import_diff=False):
+    def __init__(self, maps, import_diff=False, keyreads=None):
         self.m = maps
+        self.keyreads = keyreads
         # With import_diff, changes whose effect is decided while sqlglot is imported
         # are not answered here. They are left in self.deferred for the selector,
         # which compares sqlglot's state after import with and without the patch
@@ -131,13 +134,14 @@ class Analyzer:
         self.import_diff = import_diff
         self.deferred = None
 
-    def defer(self, why, fallback, notes):
+    def defer(self, why, fallback, notes, attrs=()):
         """Leave an import-time question for the import diff. fallback = the tests to
         take if the diff can't run (None: all of them)."""
         d = self.deferred
         if d is None:
-            d = self.deferred = {"fallback": set(), "all": False, "why": []}
+            d = self.deferred = {"fallback": set(), "all": False, "why": [], "attrs": set()}
         d["why"].append(why)
+        d["attrs"] |= set(attrs)
         if fallback is None:
             d["all"] = True
         else:
@@ -190,6 +194,12 @@ class Analyzer:
                 self.defer(f"{ck} {','.join(sorted(names))} read at import", u, notes)
             else:
                 out |= u
+        if self.import_diff and self.keyreads is not None:
+            # The import diff says which settings really changed (a replaced line also
+            # marks the setting below it here) and, for dicts, which keys; the key map
+            # says who read those keys. Settings it can't fingerprint keep these readers.
+            self.defer(f"{ck} {','.join(sorted(names))} settings", out, notes, attrs=keys)
+            return set()
         return out
 
     # ---- TPC query files ---------------------------------------------------
@@ -408,12 +418,20 @@ class Analyzer:
                     bases.setdefault(c, set()).add(b)
             m._bases = bases
         out = set()
+        forced = self.deferred["attrs"] if self.deferred else set()
         changed = []
+        balias, aalias = before.get("alias", {}), after.get("alias", {})
+        realiased = {k for k in balias.keys() | aalias.keys() if balias.get(k) != aalias.get(k)}
         for k in bsnap.keys() | asnap.keys():
             b, a = bsnap.get(k), asnap.get(k)
+            if k in realiased:
+                changed.append(k)  # same contents, but now shared with another setting or no longer
+                continue
             if b == a or k in unstable:
                 continue
             if b and a and b[0].endswith("!opaque") and a[0].endswith("!opaque"):
+                if k[0] == "a" and f"{k[1]}.{k[2]}" in forced:
+                    changed.append(k)  # an edited setting we can't compare: keep its readers
                 continue
             changed.append(k)
         def users(ck):
@@ -437,6 +455,12 @@ class Analyzer:
                     s = set(m.attr2t.get(f"{ck}.{name}", ()))
                     for sc in m.subclasses.get(ck, ()):
                         s |= m.attr2t.get(f"{sc}.{name}", set())
+                    narrowed = None
+                    if b is not None and a is not None and k not in realiased:
+                        narrowed = self.dict_key_readers(k, before, after, notes)
+                    if narrowed is not None:
+                        # tests the key map never recorded keep their attribute-level read
+                        s = narrowed | (s - self.keyreads.recorded)
                     if b is None or a is None:
                         # it now shadows (or stops shadowing) an inherited setting,
                         # whose reads were recorded on the base class
@@ -470,4 +494,25 @@ class Analyzer:
                 s = self.module_global(path, {name}, notes)
                 out |= s
         notes.append(f"import diff: {len(changed)} changed, {len(out)} tests")
+        return out
+
+    def dict_key_readers(self, k, before, after, notes):
+        """Tests that read a key a patch changed in the dict setting k (and the same
+        setting on subclasses), or None when that can't be said at key level."""
+        kr = self.keyreads
+        _, ck, name = k
+        bd, ad = before.get("dicts", {}).get(k), after.get("dicts", {}).get(k)
+        if kr is None or bd is None or ad is None or not kr.covers(f"{ck}.{name}"):
+            return None
+        changed, reordered = dict_change(bd, ad)
+        out = set()
+        for attr in [f"{ck}.{name}"] + [f"{sc}.{name}" for sc in self.m.subclasses.get(ck, ())]:
+            if kr.covers(attr):
+                r = kr.readers(attr, changed, reordered)
+                if r is None:
+                    return None
+                out |= r
+            else:
+                out |= self.m.attr2t.get(attr, set())
+        notes.append(f"keys of {ck}.{name}: {sorted(map(str, changed))[:3]}{' reordered' if reordered else ''} -> {len(out)} tests")
         return out

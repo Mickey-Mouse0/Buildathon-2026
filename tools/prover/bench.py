@@ -14,7 +14,8 @@ sys.path.insert(0, str(ROOT / "blast" / "prover"))
 from prove import Prover, apply_hunks, load_packaged, load_profile_dir, split_patch  # noqa: E402
 
 PYTHON = Path(os.environ.get("BENCH_PYTHON", sys.executable))
-RESULT = re.compile(r"^(PASSED|FAILED|ERROR|SUBFAILED|SUBPASSED)\S*\s+(\S+?)(?:\s|$)")
+RESULT = re.compile(r"^(PASSED|FAILED|ERROR|SUBFAILED|SUBPASSED)\b")
+NODEID = re.compile(r"^\S+?(?:\[.*\])?\s+(tests/[^\s\[\]]+?\.py::[^\s\[\]]+)")
 
 
 def materialize(patch_text, run_dir, sqlglot_dir):
@@ -22,6 +23,9 @@ def materialize(patch_text, run_dir, sqlglot_dir):
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
     shutil.copytree(sqlglot_dir / "sqlglot", run_dir / "sqlglot")
+    for entry in sqlglot_dir.iterdir():
+        if entry.name not in ("sqlglot", "tests", ".git"):
+            (run_dir / entry.name).symlink_to(entry)
     entries = split_patch(patch_text)
     if any(e["new"].removeprefix("b/").startswith("tests/") for e in entries):
         shutil.copytree(sqlglot_dir / "tests", run_dir / "tests")
@@ -46,10 +50,10 @@ def run_tests(run_dir, test_ids, timeout):
     status = {t: "missing" for t in test_ids}
     for line in proc.stdout.splitlines():
         m = RESULT.match(line)
-        if not m:
+        ids = NODEID.findall(line) if m else []
+        if not ids:
             continue
-        outcome, nodeid = m.groups()
-        nodeid = nodeid.split("[")[0]
+        outcome, nodeid = m.group(1), ids[0]
         if nodeid in status:
             if outcome in ("FAILED", "ERROR", "SUBFAILED"):
                 status[nodeid] = "failed"
