@@ -99,3 +99,21 @@ Checked: samples 124.9 s, 0 misses. Planted-bug and real-commit checks are being
 ## All-tests replay
 
 The value-replay lemma now also runs over every test, not just the 31 heavy ones. Every one of the 1,620 tests was recorded under 3 hash seeds (`test_lazy_load` excepted, because it starts its own `python`), each in a fork of one post-import process. The records of all tests are merged per expression into `blast/prover_data/union.pkl.xz` (0.9 MB). The change must also be an operator expression, and replay must give the same value as before on every recorded evaluation from any test (or the expression was never evaluated). When both hold, the whole commit cannot change any profiled test, and only unprofiled tests stay selected. On the samples, `2haz` and `66ks` now cost 0: 124.9 s becomes 118.6 s with 0 misses, at about +0.5 s CPU. Every whole-commit claim on the planted bugs was checked by running every test that covers the changed file.
+
+## Import diff
+
+Some changes take effect while sqlglot is being imported: a setting that a metaclass or `__init_subclass__` reads to build another one (`NUMERIC_ESCAPES` → `ESCAPED_SEQUENCES`, `TIME_MAPPING` → `TIME_TRIE`), the body of that import-time code, a class header or decorator, an import line. Per-test coverage can't say who depends on what was built, so these used to fall back to every user of the class, or to every test.
+
+Now the selector imports the patched sqlglot in a child process (`blast/importstate.py`, patched files served from memory) and fingerprints every class attribute and module global, including classes built at import that no module names. It compares that with the same fingerprint of the pinned commit, taken at build time (`tools/build_importstate.sh`, under hash seed 0, with entries that vary between processes marked). Then it maps what differs:
+
+- a setting: the tests that read it (on that class, its subclasses, and on bases if it starts or stops shadowing one);
+- a module constant: the module-constant rule;
+- a function or method defined right there with `def`: nothing extra, since the line rules cover its body and signature;
+- anything else (a method added or replaced, a dunder such as a dataclass's `__hash__`, a class built at import): every user of the class, meaning tests that read its settings or ran a function that names it;
+- an enum member, or a module that now fails to import: every test.
+
+Each diff costs about 0.6 s of CPU, so it runs only when its fallback would cost more than 1.2 s. sqlglot is also pre-compiled in the image, which saves about 0.4 s of CPU per run.
+
+The recorder also had a gap: it switched on its import bucket only after `import sqlglot`, so function bodies run during that import were recorded nowhere. It is fixed, and `tools/import_lines.py` added the missing 176 lines to the shipped map.
+
+Checked (corrected labels, 0 misses everywhere): samples 118.6 → 115.0 s, planted bugs 334.2 → 244.5 s, real commits 565.0 → 509.1 s.
