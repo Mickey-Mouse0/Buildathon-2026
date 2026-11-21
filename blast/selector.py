@@ -156,6 +156,10 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
     change, by the per-query map."""
     if not (os.path.exists(TPC_MAP) and os.path.exists(TPC_EXPECTED)):
         return chosen
+    # The check replays the queries and data as they were at build time, so it can't
+    # judge an edit to a test or fixture file (a TPC query file edit changes the query).
+    if any(not fc.path.startswith("sqlglot/") for fc in files):
+        return chosen
     if not _tpc:
         import gzip
 

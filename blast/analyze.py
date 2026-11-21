@@ -25,6 +25,29 @@ DIALECT_DIRS = ("sqlglot.dialects.", "sqlglot.parsers.", "sqlglot.generators.",
                 "sqlglot.tokenizers.", "sqlglot.typing.")
 
 
+# TestExecutor.setUpClass loads both TPC query files into class attributes, so the map
+# credits each file to every TestExecutor test. Only these tests read the attribute
+# holding that file's queries (self.tpch_sqls / self.tpcds_sqls).
+EXECUTOR = "tests/test_executor.py::TestExecutor::"
+TPC_SQL = {
+    "tests/fixtures/optimizer/tpc-h/tpc-h.sql": ("test_optimized_tpch", "test_execute_tpch"),
+    "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql": ("test_execute_tpcds",),
+}
+
+
+def tpc_pairs_load(text):
+    """What tests/helpers.load_sql_fixture_pairs does with a file's text, at the pinned
+    commit: raises exactly when it would raise inside setUpClass."""
+    statements = "\n".join(l for l in text.splitlines() if l and not l.startswith("--")).split(";")
+    for i in range(0, len(statements), 2):
+        if i + 1 < len(statements):
+            lines = statements[i].strip().split("\n")
+            j = 0
+            while lines[j].startswith("#"):
+                key, val = lines[j].split(":", maxsplit=1)
+                j += 1
+
+
 class Maps:
     def __init__(self, path, src):
         with gzip.open(path, "rb") as f:
@@ -167,6 +190,25 @@ class Analyzer:
                 self.defer(f"{ck} {','.join(sorted(names))} read at import", u, notes)
             else:
                 out |= u
+        return out
+
+    # ---- TPC query files ---------------------------------------------------
+    def tpc_sql(self, fc, path, tests, notes):
+        """Drop the TestExecutor tests that never read this file's queries, unless the
+        edited file would make setUpClass itself fail (then the whole class fails)."""
+        m = self.m
+        try:
+            with open(os.path.join(m.src, path), encoding="utf-8") as f:
+                new = fc.apply(f.read())
+            if new is None or "\ufffd" in new:
+                return tests
+            tpc_pairs_load(new)
+        except Exception:
+            notes.append("TPC file breaks setUpClass: whole class")
+            return tests
+        keep = {EXECUTOR + n for n in TPC_SQL[path]}
+        out = {i for i in tests if not (m.tests[i].startswith(EXECUTOR) and m.tests[i] not in keep)}
+        notes.append(f"TPC file: {len(tests) - len(out)} executor tests dropped")
         return out
 
     # ---- module constants -----------------------------------------------
@@ -314,6 +356,8 @@ class Analyzer:
                     notes.append(f"unmapped data file {path}")
                     return None, notes
                 notes.append(f"data file {path}: {len(s)}")
+                if path in TPC_SQL:
+                    s = self.tpc_sql(fc, path, s, notes)
                 out |= s
             elif path.startswith("tests/") and path.endswith(".py"):
                 s = m.tests_by_file.get(path)
