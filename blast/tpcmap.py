@@ -172,8 +172,8 @@ def check(src, expected_path):
             fixture, sqls, schema = suite(src, test_id)
             from sqlglot import find_tables, parse_one
 
-            # queries come cheapest first; tables load as a query first needs them, so a
-            # patch that changes an early query's result stops the check before the rest
+            # tables load as a query first needs them, so a patch that changes an early
+            # query's result stops the check before the rest are loaded or run
             tables = {}
             for q in queries:
                 meta, sql, _ = sqls[q]
