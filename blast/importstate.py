@@ -54,7 +54,7 @@ class _Canon:
     def __call__(self, v):
         t = type(v)
         if v is None or t in (bool, int, float, complex, str, bytes):
-            k = (t, v)
+            k = (t, repr(v)) if t in (float, complex) else (t, v)  # 0.0 == -0.0
             hit = self.leaves.get(k)
             if hit is None:
                 hit = self.leaves[k] = _h(t.__name__, v)
@@ -63,11 +63,14 @@ class _Canon:
             return _h("enum", type(v).__module__, type(v).__qualname__, v.name)
         key = id(v)
         hit = self.memo.get(key)
-        if hit is not None:
-            return hit
-        self.memo[key] = b"cycle"  # placeholder while we recurse
+        if hit is not None and hit[0] is v:
+            return hit[1]
+        # The entry holds v itself: many values here are temporary (the field dicts
+        # built for objects and classes below), and once one is freed its id would
+        # be reused by the next, which would then get the freed one's digest.
+        self.memo[key] = (v, b"cycle")  # placeholder while we recurse
         out = self._compound(v, t)
-        self.memo[key] = out
+        self.memo[key] = (v, out)
         return out
 
     def _compound(self, v, t):
