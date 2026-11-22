@@ -38,6 +38,28 @@ SLICED = ("tests.test_optimizer",)
 # predicted CPU of a test run here, per second it took under pytest (median ~0.7, p90 ~1.1)
 PRED_X = float(os.environ.get("BLAST_RUNCHECK_PRED_X", "1.4"))
 POOLED = ("tests.test_optimizer", "tests.test_executor")
+# A fresh process that imports the patched sqlglot (cold): what its start costs, and
+# what DuckDB, pandas and numpy add when a selected test's module imports them.
+COLD_BASE_S = 0.6
+COLD_DEPS_S = 3.0
+# TestExecutor.setUpClass loads every TPC table (over a second of CPU) for three tests
+# that are never run here. When the selector says the patch can't change that setup
+# (req["nosetup"]), it is skipped: a test that reads what it builds errors and stays.
+NO_SETUP = {"tests/test_executor.py::TestExecutor"}
+
+
+def skip_class_setup():
+    for c in NO_SETUP:
+        f, name = c.split("::")
+        cls = getattr(sys.modules.get(f[:-3].replace("/", ".")), name, None)
+        if cls is not None:
+            cls.setUpClass = classmethod(lambda k: None)
+            cls.tearDownClass = classmethod(lambda k: None)
+
+
+def setup_cost(req, setup):
+    skip = NO_SETUP if req.get("nosetup") else ()
+    return sum(1.3 * setup.get(c, 0.0) for c in {t.rsplit("::", 1)[0] for t, _ in req["tests"]} if c not in skip)
 
 
 # ---------------------------------------------------------------- warm-up
@@ -481,14 +503,14 @@ def handle(req, src, idx, called, keys, slices, setup):
     for rel, (old, new) in req["files"].items():
         p, why = plan(os.path.join(src, rel), old, new)
         if p is None:
-            return {"skip": why}
+            return {"skip": why} if why.startswith("does not compile") else {"skip": why, **cold_plan(req, slices, setup)}
         pairs += p
     if not pairs:
         return {"skip": "no code changed"}
     direct = [k for k, c, d in pairs if d]
     hot = [k for k in direct if k in called]
     if hot:
-        return {"skip": f"changed code runs at import: {hot[0][1]}"}
+        return {"skip": f"changed code runs at import: {hot[0][1]}", **cold_plan(req, slices, setup)}
     changed = {keys[k] for k in direct if k in keys}
     filters, pred, caps = {}, 0.0, {}
     for tid, sec in req["tests"]:
@@ -502,7 +524,7 @@ def handle(req, src, idx, called, keys, slices, setup):
         pred += p
         caps[tid] = max(1.0, 4 * p)
     # class setups run outside the per-test caps; the child's overall deadline bounds them
-    pred += sum(1.3 * setup.get(c, 0.0) for c in {t.rsplit("::", 1)[0] for t, _ in req["tests"]})
+    pred += setup_cost(req, setup)
     if pred > req["budget"]:
         return {"skip": f"predicted {pred:.2f}s CPU over the {req['budget']:.2f}s budget", "pred": pred}
     r, w = os.pipe()
@@ -517,6 +539,8 @@ def handle(req, src, idx, called, keys, slices, setup):
                 for fn in idx.get(k, ()):
                     fn.__code__ = c
             sys.setrecursionlimit(RECURSION_LIMIT)
+            if req.get("nosetup"):
+                skip_class_setup()
             STATE["filters"] = filters
             bad = run_tests([t for t, _ in req["tests"]], caps)
             _send(w, (sorted(bad), run_tests.cpu))
@@ -541,6 +565,64 @@ def handle(req, src, idx, called, keys, slices, setup):
     _, status, ru = os.wait4(pid, 0)
     resp["cpu"] = ru.ru_utime + ru.ru_stime
     return resp
+
+
+def cold_plan(req, slices, setup):
+    """What running the tests in a fresh process on the patched code would cost."""
+    pred, caps = COLD_BASE_S, {}
+    if any(t.split("::")[0][:-3].replace("/", ".") in POOLED for t, _ in req["tests"]):
+        pred += COLD_DEPS_S
+    for tid, sec in req["tests"]:
+        p = (1.3 * sum(slices[tid][1].values()) if tid in slices else PRED_X * sec) + 0.01
+        pred += p
+        caps[tid] = max(1.0, 4 * p)
+    pred += setup_cost(req, setup)
+    return {"cold_pred": pred, "cold_caps": caps}
+
+
+def cold(src, deps):
+    """One request on stdin: import the patched sqlglot from scratch, as the zygote's
+    warm-up does with the pinned one, and run the tests. For edits the zygote can't take
+    over by swapping function code (class and module bodies, code that runs at import)."""
+    req = pickle.load(sys.stdin.buffer)
+    out = os.dup(1)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    os.environ["SKIP_INTEGRATION"] = "0"
+    for v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[v] = "1"
+    sys.path.insert(0, src)
+    if deps and deps not in sys.path:
+        sys.path.append(deps)
+    os.chdir(src)
+    from importstate import _Overlay
+
+    sys.meta_path.insert(0, _Overlay({os.path.join(src, k): new for k, (old, new) in req["files"].items()}))
+    import sqlglot
+
+    # every sqlglot module, as in the zygote and in a full pytest run: a test that walks
+    # the loaded dialects must find the patched one among them
+    for m in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
+        if not m.name.endswith("__main__"):
+            try:
+                importlib.import_module(m.name)
+            except BaseException:
+                pass
+    ids = [t for t, _ in req["tests"]]
+    for tid in ids:
+        try:
+            importlib.import_module(tid.split("::")[0][:-3].replace("/", "."))
+        except BaseException:
+            pass
+    isolate()
+    install_slicing()
+    sys.setrecursionlimit(RECURSION_LIMIT)
+    if req.get("nosetup"):
+        skip_class_setup()
+    bad = run_tests(ids, req["caps"])
+    os.write(out, pickle.dumps((sorted(bad), run_tests.cpu)))
+    os._exit(0)
 
 
 class Zygote:
@@ -589,5 +671,7 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "record":
         record(os.path.abspath(sys.argv[2]), sys.argv[3], os.path.abspath(sys.argv[4]))
+    elif cmd == "cold":
+        cold(os.path.abspath(sys.argv[2]), sys.argv[3])
     elif cmd == "serve":
         serve(os.path.abspath(sys.argv[2]), sys.argv[3], os.path.abspath(sys.argv[4]))

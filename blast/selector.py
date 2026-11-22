@@ -7,6 +7,7 @@ import gc
 import json
 import os
 import pickle
+import resource
 import subprocess
 import sys
 import time
@@ -533,6 +534,8 @@ RUNCHECK_DATA = os.environ.get("BLAST_RUNCHECK_DATA", str(HERE))
 RUNCHECK_MAX_MS = 2600
 RUNCHECK_CAP_S = float(os.environ.get("BLAST_RUNCHECK_CAP", "2.0"))
 RUNCHECK_SHARE = float(os.environ.get("BLAST_RUNCHECK_SHARE", "0.5"))
+RUNCHECK_COLD = os.environ.get("BLAST_RUNCHECK_COLD", "1") == "1"
+RUNCHECK_NOSETUP = os.environ.get("BLAST_RUNCHECK_NOSETUP", "1") == "1"
 _zygote = []
 
 
@@ -570,8 +573,26 @@ def runtime_check(cid, files, chosen, ms, id_of):
     if not z.ok:
         return chosen
     req = {"files": srcs, "tests": [(id_of[n], ms[n] / 1000) for n in run], "budget": budget,
+           "nosetup": RUNCHECK_NOSETUP and not tpc_setup_needed(files),
            "wall": min(3 * budget + 5, max(_time_left() - 5, 1))}
     resp = z.ask(req, timeout=req["wall"] + 15)
+    fresh = ""
+    if "bad" not in resp and RUNCHECK_COLD and resp.get("cold_pred", budget + 1) <= budget:
+        why, pred = resp.get("skip"), resp["cold_pred"]
+        before = resource.getrusage(resource.RUSAGE_CHILDREN)
+        r = subprocess.run([sys.executable, str(HERE / "runcheck.py"), "cold", SRC, TPC_DEPS if os.path.isdir(TPC_DEPS) else ""],
+                           input=pickle.dumps({"files": srcs, "tests": req["tests"], "caps": resp["cold_caps"],
+                                               "nosetup": req["nosetup"]}),
+                           capture_output=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SKIP_INTEGRATION="0"),
+                           timeout=req["wall"] + 10)
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        cpu = after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime
+        if r.returncode != 0 or not r.stdout:
+            resp = {"skip": f"{why}; fresh process failed", "cpu": cpu}
+        else:
+            bad, tcpu = pickle.loads(r.stdout)
+            resp = {"bad": bad, "tcpu": tcpu, "pred": pred, "cpu": cpu}
+            fresh = f" in a fresh process ({why})"
     if "bad" not in resp:
         log(cid, f"runtime check skipped: {resp.get('skip')}" + (f" (child {resp['cpu']:.2f}s)" if "cpu" in resp else ""))
         return chosen
@@ -580,7 +601,7 @@ def runtime_check(cid, files, chosen, ms, id_of):
         log(cid, f"runtime check: setup error, kept ({resp['cpu']:.2f}s)")
         return chosen
     keep = [n for n in chosen if n in set(rest) or id_of[n] in bad]
-    log(cid, f"runtime check: ran {len(run)} tests ({resp['cpu']:.2f}s CPU, predicted {resp['pred']:.2f}s), "
+    log(cid, f"runtime check: ran {len(run)} tests{fresh} ({resp['cpu']:.2f}s CPU, predicted {resp['pred']:.2f}s), "
              f"{len(bad)} fail, dropped {len(chosen) - len(keep)}; " + ", ".join(
                  f"{t.rsplit('::', 1)[1]} {c:.2f}" for t, c in sorted(resp.get("tcpu", {}).items(), key=lambda x: -x[1])[:3]))
     return keep

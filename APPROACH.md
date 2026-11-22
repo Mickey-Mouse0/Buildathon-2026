@@ -232,3 +232,14 @@ Measured in the scorer's image under its limits (2 cores, 4 GB, read-only, user 
 The stand-in sets are single mutations from `tools/prover/make_eval_set.py`, one run each, so tenths are noise. Sets 3 and 7 and the samples come out 0.2 to 0.9 s higher (the front pass starting on commits where the test then stays); the other six are lower, set 6 by 21.7 s. On set 5 main selects less, because it ran one whole TPC-DS check that this version's budget turns down; it still spends 24.6 s less CPU there.
 
 Checked: every test this version drops and main keeps was run under pytest on the patched tree, in the scorer's image: 4 commits, 3 of them dropping `test_execute_tpcds`, 0 failures. Samples: 0 misses.
+
+## Runtime check: fresh process and skipped class setup
+
+Two additions to the runtime check, both aimed at small selections of light tests that pass.
+
+- **Fresh process.** The zygote can only swap function bodies, so a patch to a class or module body, to code that runs at import, or one that changes a function's code shape was never checked. For those, when the cost fits the same budget, `runcheck.py cold` starts a new process that imports the patched sqlglot through the overlay loader (every sqlglot module, as the zygote does with the pinned one), imports the selected tests' modules and runs them with the zygote's runner. It costs about 0.2 s of CPU in the image before the tests, or 1.4 s when a test module imports DuckDB and pandas. `BLAST_RUNCHECK_COLD=0` turns it off.
+- **No class setup for `TestExecutor`.** Its `setUpClass` loads every TPC table, over a second of CPU, and only three tests read what it builds (`test_execute_tpch`, `test_execute_tpcds`, `test_optimized_tpch`), none of which the runtime check runs. When `tpc_setup_needed` says the patch cannot change that setup, the check replaces `setUpClass` and `tearDownClass` with nothing. A test that did read the tables would raise `AttributeError` and stay selected. The predicted cost drops with it, so more selections fit the budget. `BLAST_RUNCHECK_NOSETUP=0` turns it off.
+
+Measured in the image (native arm64, the scorer's limits): the samples go from 98.97 s to 94.43 s with 0 misses, which is the cost of selecting exactly the failing tests. `5y72` now runs its 3 tests for 0.34 s of CPU instead of 1.19 s and drops them; `ktz3` (a class-level dict) runs in a fresh process for 0.31 s and drops its 3. On 200 planted commits, 5 change (6.7 s less), and no dropped test is one the labels say fails.
+
+Not checked under `linux/amd64` on an Apple Silicon Mac: the recording step dies there with "Illegal instruction" inside the emulator, so the runtime check is off in that build and `make sample` gives 101.357 s with 0 misses.
