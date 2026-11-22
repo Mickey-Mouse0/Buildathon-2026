@@ -8,3 +8,5 @@ blast/tokreplay_base.pkl
 blast/tpc_expected.pkl
 blast/tpc_known.json
 blast/maxnodes_hl.pkl
+blast/runcheck_called.pkl
+blast/runcheck_slices.pkl

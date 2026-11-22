@@ -473,6 +473,66 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
     return [x for x in chosen if x not in drop]
 
 
+# Runtime check (blast/runcheck.py): run the light selected tests on the patched code
+# in a forked, pre-warmed process; the ones that pass are dropped. BLAST_RUNCHECK=0: off.
+RUNCHECK = os.environ.get("BLAST_RUNCHECK", "1") == "1"
+RUNCHECK_DATA = os.environ.get("BLAST_RUNCHECK_DATA", str(HERE))
+RUNCHECK_MAX_MS = 2600
+RUNCHECK_CAP_S = float(os.environ.get("BLAST_RUNCHECK_CAP", "2.0"))
+RUNCHECK_SHARE = float(os.environ.get("BLAST_RUNCHECK_SHARE", "0.5"))
+_zygote = []
+
+
+def runtime_check(cid, files, chosen, ms, id_of):
+    if any(not (fc.path.startswith("sqlglot/") and fc.path.endswith(".py")) or fc.old_path is None
+           or fc.new_path is None or fc.old_path != fc.new_path for fc in files):
+        return chosen
+    run = [n for n in chosen if ms[n] <= RUNCHECK_MAX_MS and not id_of[n].startswith(EXECUTOR_FILE + "::TestExecutor::test_execute_")]
+    if not run:
+        return chosen
+    rest = [n for n in chosen if n not in set(run)]
+    gain = cost(chosen, ms) - cost(rest, ms)
+    budget = min(RUNCHECK_CAP_S, RUNCHECK_SHARE * gain / 1000)
+    if budget < 0.05:
+        return chosen
+    if _time_left() < 15:
+        log(cid, f"runtime check skipped: out of time ({_time_left():.0f}s left)")
+        return chosen
+    srcs = {}
+    for fc in files:
+        with open(os.path.join(SRC, fc.old_path), encoding="utf-8") as f:
+            old = f.read()
+        new = fc.apply(old)
+        if new is None:
+            return chosen
+        srcs[fc.path] = (old, new)
+    if not _zygote:
+        import runcheck
+
+        t = time.process_time()
+        z = runcheck.Zygote(SRC, TPC_DEPS if os.path.isdir(TPC_DEPS) else "", RUNCHECK_DATA, timeout=min(30, _time_left() - 5))
+        _zygote.append(z)
+        log(cid, f"runtime check: zygote {'ready' if z.ok else 'failed to start'} (warm-up {getattr(z, 'warm', None)})")
+    z = _zygote[0]
+    if not z.ok:
+        return chosen
+    req = {"files": srcs, "tests": [(id_of[n], ms[n] / 1000) for n in run], "budget": budget,
+           "wall": min(3 * budget + 5, max(_time_left() - 5, 1))}
+    resp = z.ask(req, timeout=req["wall"] + 15)
+    if "bad" not in resp:
+        log(cid, f"runtime check skipped: {resp.get('skip')}" + (f" (child {resp['cpu']:.2f}s)" if "cpu" in resp else ""))
+        return chosen
+    bad = set(resp["bad"])
+    if "*" in bad:
+        log(cid, f"runtime check: setup error, kept ({resp['cpu']:.2f}s)")
+        return chosen
+    keep = [n for n in chosen if n in set(rest) or id_of[n] in bad]
+    log(cid, f"runtime check: ran {len(run)} tests ({resp['cpu']:.2f}s CPU, predicted {resp['pred']:.2f}s), "
+             f"{len(bad)} fail, dropped {len(chosen) - len(keep)}; " + ", ".join(
+                 f"{t.rsplit('::', 1)[1]} {c:.2f}" for t, c in sorted(resp.get("tcpu", {}).items(), key=lambda x: -x[1])[:3]))
+    return keep
+
+
 def main():
     # The maps are millions of small objects; the cycle collector would rescan them
     # over and over while they load. Nothing here builds garbage cycles worth freeing.
@@ -482,6 +542,7 @@ def main():
     _tests.append(tests)
     ms = {t["number"]: int(t["seconds"] * 1000 + 0.5) for t in tests}
     by_id = {t["id"]: t["number"] for t in tests}
+    id_of = {t["number"]: t["id"] for t in tests}
     every = sorted(ms)
     tok = None
     try:
@@ -638,10 +699,17 @@ def main():
                 chosen = tpc_query_edit(cid, files, chosen, ms, by_id)
             except Exception as e:
                 log(cid, "tpc query edit error, keeping the tests:", repr(e))
+        if RUNCHECK and chosen and files is not None and not broke:
+            try:
+                chosen = runtime_check(cid, files, chosen, ms, id_of)
+            except Exception as e:
+                log(cid, "runtime check error, keeping the tests:", repr(e))
         workers = pack(chosen, ms)
         if workers:
             total += max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)
         print(json.dumps({"commit": cid, "workers": workers}), flush=True)
+    for z in _zygote:
+        z.finish()
     log(f"estimated simulated {total / 1000:.1f}s, cpu so far {time.process_time() - t0:.2f}s")
 
 
