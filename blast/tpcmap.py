@@ -78,7 +78,12 @@ class _SameTree(BaseException):
     in sqlglot can swallow it."""
 
 
+class _OtherTree(BaseException):
+    """Raised at Plan() by a front pass that found a different tree."""
+
+
 SAME = object()
+OTHER = object()
 _hook = {"at_plan": None, "tabs": None, "needed": None, "on": False}
 
 
@@ -182,6 +187,8 @@ def run_query(meta, sql, schema, tables, at_plan=None, at_post=None):
         res = (tuple(table.columns), [tuple(r) for r in table.rows])
     except _SameTree:
         res = SAME
+    except _OtherTree:
+        res = OTHER
     finally:
         _hook["at_plan"] = None
     if at_post is not None:
@@ -319,13 +326,23 @@ def check(src, expected_path):
     input and run the same code, so they are skipped. Otherwise it runs in full."""
     job = pickle.load(sys.stdin.buffer)
     sys.setrecursionlimit(20000)
+    import signal
+
+    def out_of_time(*_):
+        # a patch that makes a query loop: say "kept" for everything and leave
+        print("tpccheck: out of time", file=sys.stderr)
+        sys.stdout.buffer.write(pickle.dumps({"_stats": {}}))
+        sys.stdout.buffer.flush()
+        os._exit(0)
+
+    signal.signal(signal.SIGALRM, out_of_time)
+    signal.setitimer(signal.ITIMER_REAL, job.get("front_deadline", 3600))
     sys.path.insert(0, HERE)
     from importstate import _Overlay
 
     sys.meta_path.insert(0, _Overlay({os.path.join(src, k): v for k, v in job["overlay"].items()}))
     with open(expected_path, "rb") as f:
         expected = pickle.load(f)
-    verdict, stats = {}, {}
     try:
         setup_tables = class_setup(src)
     except BaseException as e:
@@ -334,6 +351,16 @@ def check(src, expected_path):
         verdict["_stats"] = {}
         sys.stdout.buffer.write(pickle.dumps(verdict))
         return
+    sys.stdout.buffer.write(pickle.dumps(check_job(src, job, expected, setup_tables)))
+
+
+def check_job(src, job, expected, setup_tables):
+    """check()'s work once the patched sqlglot is in place and the tables are loaded.
+    blast/runner.py calls it in a fork of its server, where both are already there.
+    SIGALRM must have a handler that gives up: every query sets a time limit."""
+    import signal
+
+    verdict, stats = {}, {}
     for test_id, queries in job["jobs"].items():
         ok = True
         st = stats[test_id] = {"same_tree": 0, "ran": 0}
@@ -345,9 +372,16 @@ def check(src, expected_path):
             # TPC-DS tables come from the class setup above; others load as a query
             # first needs them
             tables = dict(setup_tables) if fixture == "tpc-ds" else {}
-            for front, q in [(True, q) for q in queries["front"]] + [(False, q) for q in queries["full"]]:
+            cpu = job.get("cpu", {}).get(test_id)
+            fcpu = job.get("front_cpu", {}).get(test_id)
+
+            def one(q, front):
                 meta, sql, _ = sqls[q]
                 exp_ = expected[test_id][q]
+                # a query that takes ten times its usual CPU is a patch that loops
+                c = (fcpu if front else cpu) if cpu is not None and fcpu is not None else None
+                if c is not None:
+                    signal.setitimer(signal.ITIMER_REAL, 10 * c[q] + (3 if front else 6))
                 if meta.get("execute"):
                     need = {t.name for t in find_tables(parse_one(sql))} - tables.keys()
                     if need:
@@ -357,18 +391,60 @@ def check(src, expected_path):
                     if exp_.get("tree") is not None and tree_digest(tree) == exp_["tree"] \
                             and tabs_shape(tabs, _hook["needed"]) == exp_["tabs"]:
                         raise _SameTree
+                    raise _OtherTree
 
                 res, duck = run_query(meta, sql, schema, tables, at_plan if front else None)
+                if res is OTHER:
+                    return None if duck == exp_["duckdb"] else False
                 st["same_tree" if res is SAME else "ran"] += 1
-                if (res is not SAME and res != exp_["result"]) or duck != exp_["duckdb"]:
+                return not ((res is not SAME and res != exp_["result"]) or duck != exp_["duckdb"])
+
+            # Front queries first, only as far as Plan(): about a fifth of a full run.
+            # Those whose tree differs join the queries that must run in full. The
+            # caller says how much CPU the full runs may cost (its estimates): once
+            # they add up to more, the test stays. The first cheap query whose tree
+            # differs runs in full right away: a patch that changes results usually
+            # changes many, and then the rest of the pass is saved.
+            full = list(queries["full"])
+            budget = job.get("full_budget", {}).get(test_id, float("inf"))
+            need_s = sum(cpu[q] for q in full) if cpu is not None else 0.0
+            probed = set()
+            order = queries["front"] if cpu is None else sorted(queries["front"], key=lambda q: (-cpu[q], q))
+            for q in order:
+                if need_s > budget:
+                    break
+                r = one(q, True)
+                if r is False:
                     ok = False
                     break
+                if r is None:
+                    full.append(q)
+                    if cpu is not None:
+                        need_s += cpu[q]
+                        if not probed and cpu[q] <= 0.4 and need_s <= budget:
+                            probed.add(q)
+                            if one(q, False) is not True:
+                                ok = False
+                                break
+            st["full_est"] = need_s
+            if ok and need_s > budget:
+                print(f"tpccheck: queries to run in full come to over ~{need_s:.1f}s: over budget", file=sys.stderr)
+                ok = False
+            if cpu is not None:
+                # cheapest first, for the same reason
+                full.sort(key=lambda q: (cpu[q], q))
+            full = [q for q in full if q not in probed]
+            if ok:
+                for q in full:
+                    if one(q, False) is not True:
+                        ok = False
+                        break
         except Exception as e:
             print("tpccheck:", test_id, repr(e), file=sys.stderr)
             ok = False
         verdict[test_id] = ok
     verdict["_stats"] = stats
-    sys.stdout.buffer.write(pickle.dumps(verdict))
+    return verdict
 
 
 if __name__ == "__main__":

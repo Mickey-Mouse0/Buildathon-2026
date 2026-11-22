@@ -289,11 +289,16 @@ TPC_EXPECTED = os.environ.get("BLAST_TPC_EXPECTED", str(HERE / "tpc_expected.pkl
 # gate decides the same way. Measured at build they swung around the gate's cutoff.
 TPC_CPU = os.environ.get("BLAST_TPC_CPU", str(HERE / "tpc_cpu.json"))
 # Run the check only when its estimated CPU (+0.5 s) is under this share of the gain.
-TPC_GATE = 0.95
+TPC_GATE = float(os.environ.get("BLAST_TPC_GATE", "0.95"))
 # Off by default: on the samples and the practice set it only added CPU (checks that
 # start and then keep the test); it paid off on planted commits only.
 NO_CONSTANT_RULE = os.environ.get("BLAST_NO_CONSTANT_RULE") == "1"
-NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "0") != "1"
+NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "1") != "1"
+# The pinned per-query estimates against what the same queries cost under the scorer's
+# limits (17 s for the ~14.8 s of a whole TPC-DS check on the practice board).
+TPC_CPU_FACTOR = float(os.environ.get("BLAST_TPC_CPU_FACTOR", "1.2"))
+# Starting the check: python, the patched import, loading the tables.
+TPC_SETUP_S = float(os.environ.get("BLAST_TPC_SETUP_S", "2.5"))
 _tpc = []
 
 
@@ -383,7 +388,7 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
                     cpu[t], front_cpu[t] = p["cpu"], p["front"]
         _tpc.append((qmaps, cpu, front_cpu))
     qmaps, cpu, front_cpu = _tpc[0]
-    drop, jobs, est = set(), {}, 0.0
+    drop, jobs, est_front, est_full = set(), {}, 0.0, 0.0
     for test_id, qm in qmaps.items():
         # Never dropped by this check: tpc-h.sql has no executed queries, so the check
         # would only parse them, while the real test also builds and uses the tables.
@@ -418,18 +423,20 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
             late, _ = reached(qm["exec"])
         full = set(q) if late is None else set(late)
         front = sorted(set(q) - full)
-        # heaviest first: they run the most code, so a patch that changes any result
-        # most likely changes theirs, and the check stops there
-        jobs[test_id] = {"front": front, "full": sorted(full, key=lambda i: (-cpu[test_id][i], i))}
-        est += sum(cpu[test_id][i] for i in full) + sum(front_cpu[test_id][i] for i in front)
+        jobs[test_id] = {"front": front, "full": sorted(full)}
+        est_front += sum(front_cpu[test_id][i] for i in front)
+        est_full += sum(cpu[test_id][i] for i in full)
     if jobs:
         rest = [x for x in chosen if x not in drop]
         gain = cost(rest, ms) - cost([x for x in rest if x not in {by_id[t] for t in jobs}], ms)
-        # the check costs CPU whether or not it clears the tests, so only run it
-        # with a margin over what dropping them would save. With the pinned
-        # estimates (tpc_cpu.json) this runs a test_execute_tpcds check over its
-        # usual ~57 reached queries (~14.8 s) when dropping it saves over ~16.1 s.
-        if (est + 0.5) * 1000 >= TPC_GATE * gain:
+        # The check costs CPU whether or not it clears the tests. The front pass (each
+        # query as far as Plan(), ~2 s for all of TPC-DS) runs when the queries that
+        # must run in full anyway leave room under the gain. After it, the queries
+        # whose tree changed must run in full too; the child gives up when those
+        # would take more than what is left of the gain.
+        est = TPC_SETUP_S + TPC_CPU_FACTOR * (est_front + est_full)
+        allowed = TPC_GATE * gain / 1000
+        if est >= allowed:
             log(cid, f"tpc check skipped: ~{est:.1f}s of queries for {gain / 1000:.1f}s")
         elif _time_left() < 3 * est + 10:
             log(cid, f"tpc check skipped: out of time ({_time_left():.0f}s left, ~{est:.1f}s of queries)")
@@ -455,22 +462,170 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
             if overlay is not None:
                 # the hash seed the expected trees were recorded under
                 env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SKIP_INTEGRATION="0", PYTHONHASHSEED="0")
+                budget = (allowed - TPC_SETUP_S - TPC_CPU_FACTOR * est_front) / TPC_CPU_FACTOR
+                payload = {"overlay": overlay, "jobs": jobs, "cpu": {t: cpu[t] for t in jobs},
+                           "front_cpu": {t: front_cpu[t] for t in jobs},
+                           "full_budget": {t: budget for t in jobs},
+                           # setup, with room for a slow machine; each query then has its own limit
+                           "front_deadline": 3 * TPC_SETUP_S + 4}
                 # A patch can make a query run for minutes. The check is cut off once it has
                 # cost about what dropping the tests would save; the tests then stay.
-                r = subprocess.run([sys.executable, str(HERE / "tpcmap.py"), "check", SRC, TPC_EXPECTED],
-                                   input=pickle.dumps({"overlay": overlay, "jobs": jobs}),
-                                   capture_output=True, env=env, timeout=min(_time_left(), max(2 * est + 3, 0.8 * gain / 1000)))
-                verdict = pickle.loads(r.stdout) if r.returncode == 0 else {}
+                verdict, why = None, []
+                limit = min(_time_left(), 3 * max(est, allowed) + 10)
+                if RUNNER_ON:
+                    # in a fork of the test server, where the tables are already loaded
+                    try:
+                        reply = _runner_call(dict(payload, kind="tpc", expected=TPC_EXPECTED, timeout=limit))
+                        why.append(f"(cpu {reply['cpu'][0]:.2f}s server, {reply['cpu'][1]:.2f}s child)")
+                        if reply["status"] == "ok":
+                            verdict = reply["verdict"]
+                        elif reply["status"] == "cut off":
+                            verdict, why = {}, ["cut off"]
+                        else:
+                            why = [reply["status"]]
+                    except Exception as e:
+                        why = [repr(e)]
+                if verdict is None:
+                    try:
+                        r = subprocess.run([sys.executable, str(HERE / "tpcmap.py"), "check", SRC, TPC_EXPECTED],
+                                           input=pickle.dumps(payload), capture_output=True, env=env, timeout=limit)
+                        verdict = pickle.loads(r.stdout) if r.returncode == 0 else {}
+                        why += r.stderr.decode(errors="replace").strip().splitlines()[-1:] if r.stderr else []
+                    except subprocess.TimeoutExpired:
+                        verdict, why = {}, why + ["cut off"]
                 stats = verdict.get("_stats", {})
                 for test_id, qs in jobs.items():
                     ok = verdict.get(test_id, False)
                     st = stats.get(test_id, {})
                     log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: {len(qs['front']) + len(qs['full'])} queries reached "
                              f"({len(qs['front'])} before planning only; {st.get('same_tree', 0)} same tree, {st.get('ran', 0)} run), "
-                             f"{'same results, dropped' if ok else 'kept'}")
+                             f"{'same results, dropped' if ok else 'kept'} {'; '.join(why)}")
                     if ok:
                         drop.add(by_id[test_id])
     return [x for x in chosen if x not in drop]
+
+
+RUNNER_ON = os.environ.get("BLAST_RUNNER", "1") == "1"
+# Tests recorded at more than this are never run here: they stay selected.
+RUN_MAX_MS = int(os.environ.get("BLAST_RUN_MAX_MS", "1200"))
+# Run only when the estimated CPU is under this share of what dropping every
+# runnable test would save.
+RUN_SHARE = float(os.environ.get("BLAST_RUN_SHARE", "0.6"))
+# Recorded seconds to CPU seconds here, for the estimate.
+RUN_CPU_FACTOR = float(os.environ.get("BLAST_RUN_CPU_FACTOR", "0.9"))
+# Starts its own python, which imports sqlglot from disk without the patch.
+RUN_NEVER = {"tests/dialects/test_dialect.py::TestDialect::test_lazy_load"}
+_runner = []
+
+
+def _runner_call(job):
+    import select
+    import struct
+
+    if _runner and _runner[0] is None:
+        raise RuntimeError("runner is off")
+    if not _runner:
+        # hash seed 0: the TPC check's expected trees were recorded under it
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SKIP_INTEGRATION="0", PYTHONHASHSEED="0")
+        _runner.append(subprocess.Popen([sys.executable, str(HERE / "runner.py"), SRC, TPC_DEPS],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env))
+    p = _runner[0]
+    data = pickle.dumps(job)
+    p.stdin.write(struct.pack("<I", len(data)) + data)
+    p.stdin.flush()
+    # The server cuts its child off at job["timeout"]. If the server itself stops
+    # answering (a test module that hangs on import), it is killed and stays off.
+    fd = p.stdout.fileno()
+    deadline = time.monotonic() + job["timeout"] + 20
+    buf = b""
+    while len(buf) < 4 or len(buf) < 4 + struct.unpack("<I", buf[:4])[0]:
+        left = deadline - time.monotonic()
+        chunk = os.read(fd, 1 << 16) if left > 0 and select.select([fd], [], [], left)[0] else b""
+        if not chunk:
+            p.kill()
+            p.wait()
+            _runner[0] = None
+            raise RuntimeError("runner died or hung")
+        buf += chunk
+    return pickle.loads(buf[4:])
+
+
+# Share of the possible saving that running the tests brings back on average (some
+# of them fail and stay). Measured on the samples: 0.42.
+RUN_YIELD = float(os.environ.get("BLAST_RUN_YIELD", "0.42"))
+# One-time CPU, in ms: starting the server, importing a test module (pandas and
+# DuckDB come with test_optimizer.py and test_executor.py), TestExecutor's setup.
+RUN_SERVER_MS = 250
+RUN_MODULE_MS = 40
+RUN_PANDAS_MS = 600
+RUN_EXECUTOR_MS = 2200
+PANDAS_FILES = {"tests/test_optimizer.py", "tests/test_executor.py"}
+
+
+def run_plan(cid, files, chosen, ms, tests):
+    """What running this commit's light tests could save: None, or a dict."""
+    for fc in files:
+        p = fc.path
+        if fc.old_path != fc.new_path or not (p.startswith("sqlglot/") and p.endswith(".py")):
+            return None
+    run = [n for n in chosen if ms[n] <= RUN_MAX_MS and tests[n]["id"] not in RUN_NEVER]
+    if not run:
+        return None
+    runset = set(run)
+    rest = [n for n in chosen if n not in runset]
+    gain = cost(chosen, ms) - cost(rest, ms)
+    est = RUN_CPU_FACTOR * sum(ms[n] for n in run) + 50
+    net = RUN_YIELD * gain - est
+    if net <= 0:
+        log(cid, f"run skipped: ~{est / 1000:.1f}s for at most {gain / 1000:.1f}s")
+        return None
+    overlay = _overlay(files)
+    if overlay is None:
+        return None
+    return {"cid": cid, "run": sorted(run), "est": est, "net": net, "overlay": overlay,
+            "files": {tests[n]["file"] for n in run}}
+
+
+def run_survivors(plans, chosen_of, ms, tests):
+    """Drop, from each planned commit, the tests that pass when run on the patched
+    code (blast/runner.py). Shared one-time costs must be covered by the commits
+    that need them, or those commits are left as they are."""
+    def needs(p):
+        r = {"server"}
+        if p["files"] & PANDAS_FILES:
+            r.add("pandas")
+        if "tests/test_executor.py" in p["files"]:
+            r.add("executor")
+        return r
+
+    price = {"server": RUN_SERVER_MS, "pandas": RUN_PANDAS_MS, "executor": RUN_EXECUTOR_MS}
+    plans = list(plans)
+    for res in ("executor", "pandas", "server"):
+        users = [p for p in plans if res in needs(p)]
+        if users and sum(p["net"] for p in users) <= price[res]:
+            for p in users:
+                log(p["cid"], f"run skipped: {res} setup not worth it")
+            plans = [p for p in plans if res not in needs(p)]
+    for p in plans:
+        cid = p["cid"]
+        if _time_left() < 20:
+            break
+        try:
+            timeout = min(_time_left() - 10, 3 * p["est"] / 1000 + 8)
+            reply = _runner_call({"overlay": p["overlay"], "tests": [tests[n]["id"] for n in p["run"]], "timeout": timeout})
+            res = reply["results"]
+            passed = {n for n in p["run"] if res.get(tests[n]["id"]) is False}
+            log(cid, f"run: {reply['status']}; {len(passed)} of {len(p['run'])} pass and are dropped "
+                     f"(cpu {reply['cpu'][0]:.2f}s server, {reply['cpu'][1]:.2f}s child, est {p['est'] / 1000:.2f}s)")
+            chosen_of[cid] = [n for n in chosen_of[cid] if n not in passed]
+        except Exception as e:
+            log(cid, "run error, keeping the tests:", repr(e))
+
+
+def emit(cid, chosen, ms):
+    workers = pack(chosen, ms)
+    print(json.dumps({"commit": cid, "workers": workers}), flush=True)
+    return max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers) if workers else 0
 
 
 def main():
@@ -514,9 +669,12 @@ def main():
     except Exception as e:
         log("prover failed to load, using the selector alone:", repr(e))
     total = 0
+    by_number = {t["number"]: t for t in tests}
+    chosen_of, plans = {}, []
     for patch in sorted((DATA / "commits").glob("*.patch")):
         cid = patch.stem
         chosen = every
+        _c0 = os.times()
         _import_broke[:] = [False]
         # read before the analyzer's try: if it fails, the TPC check below must not
         # see the previous commit's patch
@@ -638,10 +796,32 @@ def main():
                 chosen = tpc_query_edit(cid, files, chosen, ms, by_id)
             except Exception as e:
                 log(cid, "tpc query edit error, keeping the tests:", repr(e))
-        workers = pack(chosen, ms)
-        if workers:
-            total += max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)
-        print(json.dumps({"commit": cid, "workers": workers}), flush=True)
+        chosen_of[cid] = chosen
+        if RUNNER_ON and chosen and files is not None and not broke:
+            try:
+                plan = run_plan(cid, files, chosen, ms, by_number)
+                if plan is not None:
+                    plans.append(plan)
+            except Exception as e:
+                log(cid, "run plan error, keeping the tests:", repr(e))
+        _c1 = os.times()
+        log(cid, "cpu %.2fs self, %.2fs children" % (
+            _c1.user + _c1.system - _c0.user - _c0.system,
+            _c1.children_user + _c1.children_system - _c0.children_user - _c0.children_system))
+        if not any(p["cid"] == cid for p in plans):
+            total += emit(cid, chosen, ms)
+    # Commits whose tests may be run are answered last: which runs are worth their
+    # one-time costs depends on how many commits share them.
+    if plans:
+        try:
+            run_survivors(plans, chosen_of, ms, by_number)
+        except Exception as e:
+            log("run stage error, keeping the tests:", repr(e))
+        for p in plans:
+            total += emit(p["cid"], chosen_of[p["cid"]], ms)
+    if _runner and _runner[0] is not None:
+        _runner[0].stdin.close()
+        _runner[0].wait()
     log(f"estimated simulated {total / 1000:.1f}s, cpu so far {time.process_time() - t0:.2f}s")
 
 

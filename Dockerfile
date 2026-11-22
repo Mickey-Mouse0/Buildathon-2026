@@ -10,12 +10,12 @@ RUN python /app/tools/fetch_sqlglot.py /opt/sqlglot \
     && python -c "import compileall; compileall.compile_dir('/opt/sqlglot/sqlglot', quiet=1)" \
     && chmod -R a+rX /opt/sqlglot
 
-# DuckDB, pandas and numpy at the versions the answers were labeled with, for the
-# check of edited TPC-DS queries (blast/tpcquery.py). They go in a folder of their
+# DuckDB, pandas, numpy and pytz at the versions the answers were labeled with, for the
+# check of edited TPC-DS queries (blast/tpcquery.py) and for running tests (blast/runner.py). They go in a folder of their
 # own that only that check puts on its path, so nothing else sees them.
 COPY requirements.lock /app/requirements.lock
 RUN pip install --no-cache-dir --root-user-action=ignore --target /opt/tpcdeps -c /app/requirements.lock \
-        duckdb pandas numpy \
+        duckdb pandas numpy pytz \
     && chmod -R a+rX /opt/tpcdeps
 
 COPY blast /app/blast
