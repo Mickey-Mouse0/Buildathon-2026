@@ -293,7 +293,7 @@ TPC_GATE = 0.95
 # Off by default: on the samples and the practice set it only added CPU (checks that
 # start and then keep the test); it paid off on planted commits only.
 NO_CONSTANT_RULE = os.environ.get("BLAST_NO_CONSTANT_RULE") == "1"
-NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "0") != "1"
+NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "1") != "1"
 _tpc = []
 
 
