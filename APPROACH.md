@@ -205,3 +205,36 @@ Rebuild the map in the pinned image: `python blast/tpcmap.py map <sqlglot> blast
 - **Constant settings skip the import diff.** When a file's whole change is one class-level line `NAME = constant` whose constant changed, no class body copies the setting, no import-time code mentions it, and the pinned import leaves it as plain data, its value is all that differs after import. The readers are taken from the map directly (`_constant_swap` and `class_attr` in `blast/analyze.py`); `BLAST_NO_CONSTANT_RULE=1` sends these to the import diff again. Same output with and without on the samples, the 30-commit set and 200 planted commits; it fires on 1 sample and 3 planted commits and saves one child process each (about 0.4 s in the image).
 - **The coverage map loads per file.** The image build rewrites `covmap.pkl.gz` uncompressed with one pickle per source file for the per-line table (`analyze.split_map`), and a file's table is unpickled the first time a patch touches it. Loading the map goes from 0.16 s to 0.08 s; output is identical to loading the whole map.
 
+## Running the survivors
+
+After every rule above, a commit is often left with a handful of light tests. Emitting them costs the 2 s worker even when none fails. `blast/runner.py` runs them on the patched code and the selector keeps only the ones that fail (and any the run didn't report on).
+
+- A server process imports the pinned sqlglot once, then the test modules a commit needs. For each commit it forks, the child puts the patch in place and runs the tests with `unittest`, which is what pytest does for these `TestCase` classes. `ProcessPoolExecutor` is replaced by the in-process stand-in the coverage recorder uses, because real pool workers would import sqlglot from disk, without the patch.
+- The patch goes in without a second import. Old and new source are compiled and compared code object by code object. The patch qualifies only if the module's own code and every class body's code are unchanged, so everything that differs is inside functions (lambdas included). Each live function made from a changed code object gets the new one. A patched module that isn't imported yet is served from memory when it loads.
+- The server records every function that starts while sqlglot, a test module or a class setup runs in it (`sys.monitoring`). If a function whose own code changes is among them, something may already hold its old result, and the commit is left as it was. The same goes for class-level and module-level edits, default values and decorators, edits outside `sqlglot/`, and two lambdas sharing a line.
+- A child is cut off after about three times its tests' recorded time. Tests it reported before that count; the rest stay selected. A class fixture that fails keeps everything.
+- It only runs when it can pay. Tests over 1.2 s are never run. The estimate is the tests' recorded seconds; the saving is what dropping all of them would save, times 0.42 (the share that came back on the samples). One-time costs (the server, pandas and DuckDB for `test_optimizer.py`, `TestExecutor`'s 2 s setup) must be covered by the commits that need them, which is why these commits are answered last.
+
+On 320 commits (samples and 8 stand-in sets): 85 runs, 17 where every test passed (2 s or more saved each), 24 where some did, about 17 s of CPU in total.
+
+## TPC check: front pass first
+
+The staged check is on again, and the check is rebuilt around it. It was switched off because it changed nothing on the practice set, but the final is a fresh draw of commits, and on stand-in commits most patches that reach `test_execute_tpcds` only reach it before planning.
+
+- **Front pass.** Each query the patch reaches only before `Plan()` runs as far as `Plan()`, about a fifth of a full run. Same tree and same tables as the pinned commit: done. Heaviest first, so that queries that must run in full add up fast when they are going to be too many.
+- **Probe.** As soon as one tree differs, the cheapest query that also differs runs in full. A patch that changes results usually changes many, so a real failure shows up after about one query instead of after the whole pass.
+- **Budget.** The selector passes the per-query estimates and how much CPU the full runs may cost: 95% of the gain, less the setup and the front pass. The child stops when the queries to run in full come to more. Estimates are scaled by 1.2, the practice board's 17 s for a 14.8 s check.
+- **Time limits.** Every query has its own, eight times its usual CPU plus a couple of seconds. A patch that makes the optimizer loop used to burn the whole timeout (32 s on one stand-in commit); now it costs about 4 s.
+- **Shared setup.** The check runs in a fork of the test server when the patch can be swapped in, so the tables and the pinned results load once per run instead of once per check. Otherwise it runs as its own process, as before.
+
+Measured in the scorer's image under its limits (2 cores, 4 GB, read-only, user nobody). "Before" is main; simulated seconds + CPU seconds.
+
+| Set | Before | After |
+| --- | --- | --- |
+| 30 samples | 101.4 + 4.9 | 99.0 + 7.0 |
+| 30 stand-in commits (set 1) | 163.9 + 34.6 | 132.5 + 20.0 |
+
+Against the same code with both stages and the TPC check off, on 290 stand-in commits in 8 sets, the total (simulated + CPU) went from 1,518.3 s to 1,380.0 s, and every set improved (by 2.5 s to 42 s).
+
+Checked: every test this version drops and the one without these stages keeps was run under pytest on the patched tree.
+

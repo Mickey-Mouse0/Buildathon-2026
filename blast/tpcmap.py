@@ -378,10 +378,10 @@ def check_job(src, job, expected, setup_tables):
             def one(q, front):
                 meta, sql, _ = sqls[q]
                 exp_ = expected[test_id][q]
-                # a query that takes ten times its usual CPU is a patch that loops
+                # a query that takes many times its usual CPU is a patch that loops
                 c = (fcpu if front else cpu) if cpu is not None and fcpu is not None else None
                 if c is not None:
-                    signal.setitimer(signal.ITIMER_REAL, 10 * c[q] + (3 if front else 6))
+                    signal.setitimer(signal.ITIMER_REAL, 8 * c[q] + (2 if front else 5))
                 if meta.get("execute"):
                     need = {t.name for t in find_tables(parse_one(sql))} - tables.keys()
                     if need:
@@ -410,21 +410,34 @@ def check_job(src, job, expected, setup_tables):
             need_s = sum(cpu[q] for q in full) if cpu is not None else 0.0
             probed = set()
             order = queries["front"] if cpu is None else sorted(queries["front"], key=lambda q: (-cpu[q], q))
-            for q in order:
+            order = list(order)
+            while order and ok:
                 if need_s > budget:
                     break
+                q = order.pop(0)
                 r = one(q, True)
                 if r is False:
                     ok = False
-                    break
-                if r is None:
+                elif r is None:
                     full.append(q)
                     if cpu is not None:
                         need_s += cpu[q]
-                        if not probed and cpu[q] <= 0.4 and need_s <= budget:
-                            probed.add(q)
-                            if one(q, False) is not True:
-                                ok = False
+                        if not probed and need_s <= budget:
+                            # the cheapest query that also differs, run in full
+                            for c in sorted([q] + order, key=lambda x: (cpu[x], x)):
+                                if c != q:
+                                    order.remove(c)
+                                    r = one(c, True)
+                                    if r is True:
+                                        continue
+                                    if r is False:
+                                        ok = False
+                                        break
+                                    full.append(c)
+                                    need_s += cpu[c]
+                                probed.add(c)
+                                if one(c, False) is not True:
+                                    ok = False
                                 break
             st["full_est"] = need_s
             if ok and need_s > budget:

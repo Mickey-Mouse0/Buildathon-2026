@@ -181,17 +181,32 @@ class _Result(unittest.TestResult):
         _send(self.out, (test.id(), test.id() in self.bad))
 
 
-def _swap(changes):
-    """Give every live function made from a changed code object its new code."""
-    want = {}
-    for old, new, _ in changes:
-        want[code_key(old)] = (old, new)
+_index = {"modules": -1, "by_key": {}}
+
+
+def _reindex():
+    """Every live function by its code's key, and the heap frozen: a child's garbage
+    collector then never walks (and so never copies) what the server built."""
+    if _index["modules"] == len(sys.modules):
+        return
+    gc.unfreeze()
+    by_key = {}
     for f in gc.get_objects():
         if type(f) is types.FunctionType:
             c = f.__code__
-            hit = want.get((c.co_filename, c.co_firstlineno, c.co_name))
-            if hit is not None and c.co_qualname == hit[0].co_qualname:
-                f.__code__ = hit[1]
+            by_key.setdefault((c.co_filename, c.co_firstlineno, c.co_name), []).append(f)
+    _index["by_key"] = by_key
+    _index["modules"] = len(sys.modules)
+    gc.collect()
+    gc.freeze()
+
+
+def _swap(changes):
+    """Give every live function made from a changed code object its new code."""
+    for old, new, _ in changes:
+        for f in _index["by_key"].get(code_key(old), ()):
+            if f.__code__.co_qualname == old.co_qualname:
+                f.__code__ = new
 
 
 def _child(src, job, plan, cases, wfd):
@@ -236,13 +251,19 @@ def serve(src, deps):
 
     t = os.times()
     print(f"runner: up after {t.user + t.system:.2f}s CPU", file=sys.stderr)
-    inp, outp = sys.stdin.buffer, sys.stdout.buffer
+    # Replies go out on a private copy of stdout; fd 1 itself now points at stderr,
+    # so nothing a test, a child or a C library prints can land in the protocol.
+    inp, outp = sys.stdin.buffer, os.fdopen(os.dup(1), "wb")
+    os.dup2(2, 1)
     sys.stdout = sys.stderr
     mods = {}
     compiled = {}
     while True:
         head = inp.read(4)
         if len(head) < 4:
+            t = os.times()
+            print(f"runner: {t.user + t.system:.2f}s CPU here, {t.children_user + t.children_system:.2f}s in children",
+                  file=sys.stderr)
             return
         job = pickle.loads(inp.read(struct.unpack("<I", head)[0]))
         t0 = os.times()
@@ -323,6 +344,7 @@ def handle_tpc(src, job, compiled):
         plan, why = _plan(src, job, compiled)
         if plan is None:
             return {"status": f"ineligible: {why}"}
+    _reindex()
     r, w = os.pipe()
     pid = os.fork()
     if pid == 0:
@@ -419,6 +441,7 @@ def handle(src, job, mods, compiled):
     plan, why = _plan(src, job, compiled)
     if plan is None:
         return {"status": f"ineligible: {why}", "results": {}}
+    _reindex()
     r, w = os.pipe()
     pid = os.fork()
     if pid == 0:

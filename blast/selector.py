@@ -668,6 +668,7 @@ def main():
         log(f"prover loaded for {len(prover.heavy)} heavy tests")
     except Exception as e:
         log("prover failed to load, using the selector alone:", repr(e))
+    log(f"loaded in {time.process_time() - t0:.2f}s CPU")
     total = 0
     by_number = {t["number"]: t for t in tests}
     chosen_of, plans = {}, []
@@ -822,7 +823,9 @@ def main():
     if _runner and _runner[0] is not None:
         _runner[0].stdin.close()
         _runner[0].wait()
-    log(f"estimated simulated {total / 1000:.1f}s, cpu so far {time.process_time() - t0:.2f}s")
+    t = os.times()
+    log(f"estimated simulated {total / 1000:.1f}s, cpu {t.user + t.system:.2f}s here, "
+        f"{t.children_user + t.children_system:.2f}s in children")
 
 
 if __name__ == "__main__":
