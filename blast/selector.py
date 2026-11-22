@@ -18,7 +18,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import patchutil  # noqa: E402
-from analyze import Analyzer, Maps  # noqa: E402
+import srccache  # noqa: E402
+from analyze import Analyzer, Maps, same_module  # noqa: E402
 
 DATA = Path(os.environ.get("BLAST_DATA", "/data"))
 SRC = os.environ.get("BLAST_SQLGLOT", "/opt/sqlglot")
@@ -551,11 +552,31 @@ RUNCHECK_NOSETUP = os.environ.get("BLAST_RUNCHECK_NOSETUP", "1") == "1"
 _zygote = []
 
 
-def runtime_check(cid, files, chosen, ms, id_of):
-    if any(not (fc.path.startswith("sqlglot/") and fc.path.endswith(".py")) or fc.old_path is None
-           or fc.new_path is None or fc.old_path != fc.new_path for fc in files):
-        return chosen
-    run = [n for n in chosen if ms[n] <= RUNCHECK_MAX_MS and not id_of[n].startswith(EXECUTOR_FILE + "::TestExecutor::test_execute_")]
+def runtime_check(cid, files, chosen, ms, id_of, openers=None):
+    """openers(path): numbers of the tests that open a data file under tests/ (None if
+    the map doesn't know the file), or None when there is no map."""
+    # A fixture file the patch also edits: the tests that open it are not run here (the
+    # zygote has the pinned fixtures) and stay. The others can't see that edit, so for
+    # them the commit is its code edits alone.
+    held = set()
+    code = []
+    for fc in files:
+        p = fc.path
+        if fc.old_path is None or fc.new_path is None or fc.old_path != fc.new_path:
+            return chosen
+        if p.startswith("sqlglot/") and p.endswith(".py"):
+            code.append(fc)
+        elif p.startswith("tests/fixtures/") and not p.endswith(".py") and openers is not None:
+            who = openers(p)
+            if who is None:
+                return chosen
+            held |= who
+        else:
+            return chosen
+    # The TPC executor tests are over the time limit anyway. The four light
+    # test_execute_* tests (callable, catalog_db_table, subqueries, tables) build their
+    # own tables, so they run here like any other executor test.
+    run = [n for n in chosen if ms[n] <= RUNCHECK_MAX_MS and n not in held]
     if not run:
         return chosen
     run_set = set(run)
@@ -568,13 +589,23 @@ def runtime_check(cid, files, chosen, ms, id_of):
         log(cid, f"runtime check skipped: out of time ({_time_left():.0f}s left)")
         return chosen
     srcs = {}
-    for fc in files:
+    for fc in code:
         with open(os.path.join(SRC, fc.old_path), encoding="utf-8") as f:
             old = f.read()
         new = fc.apply(old)
         if new is None:
             return chosen
+        # A file whose syntax tree is unchanged (a comment, a blank line) changes nothing
+        # a test can see (the analyzer's no-op rule); left in, a comment in a class or
+        # module body would read as a body change and stop the check.
+        try:
+            if same_module(old, srccache.pinned(fc.old_path, old), new, srccache.patched(new)):
+                continue
+        except SyntaxError:
+            pass
         srcs[fc.path] = (old, new)
+    if not srcs:
+        return chosen
     if not _zygote:
         import runcheck
 
@@ -806,7 +837,12 @@ def main():
                 log(cid, "tpc query edit error, keeping the tests:", repr(e))
         if RUNCHECK and chosen and files is not None and not broke:
             try:
-                chosen = runtime_check(cid, files, chosen, ms, id_of)
+                openers = None
+                if analyzer is not None:
+                    def openers(p):
+                        who = maps.open2t.get(p)
+                        return None if who is None else {to_number[i] for i in who}
+                chosen = runtime_check(cid, files, chosen, ms, id_of, openers)
             except Exception as e:
                 log(cid, "runtime check error, keeping the tests:", repr(e))
         workers = pack(chosen, ms)
