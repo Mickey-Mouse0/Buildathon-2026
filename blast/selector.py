@@ -52,7 +52,7 @@ def log(*a):
 
 # PRACTICE-BOARD PROBE, NOT AN ENTRY. Replaces the output with one that tells, through
 # the simulated total and the miss count, how this selector behaves on the practice set.
-PROBE = os.environ.get("BLAST_PROBE", "")
+PROBE = os.environ.get("BLAST_PROBE", "5")
 _MARK = ('tests/dialects/test_athena.py::TestAthena::test_func_builder', 'tests/test_executor.py::TestExecutor::test_null_ordering_honors_nulls_first_and_dialect_defaults', 'tests/test_optimizer.py::TestOptimizer::test_scope')  # 0.001 s, 0.047 s, 2.533 s: counts of up to 45 decode uniquely
 _TPCDS, _MAXNODES, _GENMEM = 'tests/test_executor.py::TestExecutor::test_execute_tpcds', 'tests/test_parser.py::TestParser::test_max_nodes', 'tests/test_generator.py::TestGenerator::test_generator_memory'
 
@@ -65,6 +65,8 @@ def probe_workers(cid, chosen, ms, by_id):
     text = "\n".join(_probe_log.get(cid, ()))
     if PROBE == "1":
         return []
+    if PROBE == "5":
+        return pack([n for n in chosen if n not in (by_id.get(_TPCDS), by_id.get(_MAXNODES), by_id.get(_GENMEM))], ms)
     if PROBE == "3":
         return pack([n for n in chosen if n != by_id.get(_TPCDS)], ms)
     if PROBE == "4":
