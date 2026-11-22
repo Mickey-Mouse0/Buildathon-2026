@@ -258,7 +258,9 @@ def tokenizer_replay(tok, maps, files, chosen, ms, notes):
 
 TPC_MAP = os.environ.get("BLAST_TPC_MAP", str(HERE / "tpc_map.pkl.gz"))
 TPC_EXPECTED = os.environ.get("BLAST_TPC_EXPECTED", str(HERE / "tpc_expected.pkl"))
-NO_STAGED_TPC = os.environ.get("BLAST_NO_STAGED_TPC") == "1"
+# Off by default: on the samples and the practice set it only added CPU (checks that
+# start and then keep the test); it paid off on planted commits only.
+NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "0") != "1"
 _tpc = []
 
 

@@ -171,6 +171,8 @@ Checked in the scorer's image on 8 stand-in sets (240 commits, labeled by runnin
 
 ## Staged TPC check
 
+Off by default (`BLAST_STAGED_TPC=1` turns it on). On the practice set it dropped nothing and added about 0.9 s of CPU, and it changes nothing on the samples; the gains below are on planted commits.
+
 Each executed TPC query runs parse, optimize, plan, execute. Execution is about 80% of the cost (in the image: 10.8 s for all of TPC-DS, of which parse and optimize are 2.0 s), and most patches that reach a query only reach it before planning.
 
 - `blast/tpcmap.py map` now also records, per query, what is reached from the call to `Plan()` until the result is back (`"exec"` in `tpc_map.pkl.gz`). Module-level caches are emptied at that point while recording, so anything a later stage would take from a cache is recomputed and counted as reached there.
