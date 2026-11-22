@@ -598,6 +598,20 @@ def main():
                 chosen = [n for n in chosen if n not in safe]
             except Exception as e:
                 log(cid, "fixture check error, keeping the tests:", repr(e))
+        if chosen and files is not None and not broke:
+            try:
+                import hlreplay
+
+                n = by_id.get(hlreplay.TEST_ID)
+                if n in chosen:
+                    hnotes = []
+                    if hlreplay.judge(files, SRC, hnotes):
+                        chosen = [x for x in chosen if x != n]
+                        hnotes.append("dropped test_max_nodes")
+                    if hnotes:
+                        log(cid, "; ".join(hnotes))
+            except Exception as e:
+                log(cid, "max_nodes replay error, keeping the tests:", repr(e))
         if analyzer is not None and chosen and files is not None and not broke:
             try:
                 chosen = tpc_check(cid, analyzer, files, text, chosen, ms, by_id)

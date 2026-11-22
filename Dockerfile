@@ -27,6 +27,8 @@ RUN sh /app/tools/build_importstate.sh /opt/sqlglot /app/blast/importstate.pkl \
        /app/blast/tokreplay.pkl.xz /app/blast/tokreplay_base.pkl \
     && PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcmap.py expected /opt/sqlglot /app/blast/tpc_expected.pkl \
     && PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcquery.py known /opt/sqlglot /app/blast/tpc_known.json \
+    && (PYTHONDONTWRITEBYTECODE=1 python /app/blast/hlreplay.py record /opt/sqlglot /app/blast/maxnodes_hl.pkl \
+        || echo "max_nodes recording failed: the replay stays off") \
     && python /app/blast/prover/shard.py /app/blast/prover_data/profiles.pkl.xz /app/blast/prover_data/target_index.json.gz \
        /opt/sqlglot /app/blast/prover_data/profiles.shards \
     && python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/union.pkl.xz'), open('/app/blast/prover_data/union.pkl', 'wb'))" \
