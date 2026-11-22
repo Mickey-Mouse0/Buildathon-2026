@@ -1,5 +1,6 @@
 import argparse
 import ast
+import bisect
 import gzip
 import json
 import os
@@ -570,7 +571,17 @@ class Prover:
             found = []
             keep = (ast.expr, ast.stmt, ast.mod, ast.comprehension, ast.arguments, ast.excepthandler, ast.keyword, ast.arg)
 
+            want_lines = sorted({line for line, _, _ in want})
+
             def walk(node, chain):
+                # a node that spans none of the lines holding a read has none under it
+                first = getattr(node, "lineno", None)
+                if first is not None:
+                    if getattr(node, "decorator_list", None):
+                        first = min(first, node.decorator_list[0].lineno)
+                    i = bisect.bisect_left(want_lines, first)
+                    if i == len(want_lines) or want_lines[i] > node.end_lineno:
+                        return
                 here = chain + [node] if isinstance(node, keep) else chain
                 if isinstance(node, ast.Attribute) and node.attr == name and (node.lineno, node.col_offset, node.end_col_offset) in want:
                     found.append(here)
@@ -614,6 +625,10 @@ class Prover:
                 cond = id(root) in fc.targets(chain)[1]
                 checks.append((path, root, new_root, cond, "many" if many else None))
         safe = {}
+        if any(root is not None and self.number_of_key.get(target_key(path, root)) is None for path, root, *_ in checks):
+            # a read in an expression no profile numbers: no test passes that check,
+            # so no profile needs loading to say so
+            candidates = ()
         for test in candidates:
             if test not in self.profiles:
                 continue
