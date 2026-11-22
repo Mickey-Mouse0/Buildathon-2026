@@ -9,3 +9,4 @@ blast/tpc_expected.pkl
 blast/tpc_known.json
 blast/maxnodes_hl.pkl
 blast/prover_data/reads_index.pkl
+blast/tpc_setup_lines.json

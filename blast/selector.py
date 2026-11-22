@@ -335,6 +335,41 @@ def tpc_query_edit(cid, files, chosen, ms, by_id):
     return rest if verdict["ok"] is True else chosen
 
 
+TPC_SETUP_LINES = os.environ.get("BLAST_TPC_SETUP_LINES", str(HERE / "tpc_setup_lines.json"))
+# BLAST_TPC_SETUP_ALWAYS=1: rebuild every table in each check, as 57dd629 did
+TPC_SETUP_ALWAYS = os.environ.get("BLAST_TPC_SETUP_ALWAYS") == "1"
+_setup_lines = []
+
+
+def tpc_setup_needed(files):
+    """Does the TPC check have to redo test_execute_tpcds's class setup (every table of
+    both schemas, ~1 s of CPU)? Not when the patch touches none of the lines that setup
+    runs at the pinned commit (recorded at build), no test .py file and no TPC fixture."""
+    if TPC_SETUP_ALWAYS or not os.path.exists(TPC_SETUP_LINES):
+        return True
+    if not _setup_lines:
+        with open(TPC_SETUP_LINES) as f:
+            _setup_lines.append({k: set(v) for k, v in json.load(f).items()})
+    ran = _setup_lines[0]
+    for fc in files:
+        for p in {fc.old_path, fc.new_path} - {None}:
+            if p.startswith("tests/") and (p.endswith(".py") or "/tpc-" in p):
+                return True
+        if fc.old_path is None or fc.new_path is None or fc.old_path != fc.new_path:
+            # a deleted or renamed module that setup ran; a new one runs only if a
+            # changed line imports it
+            if fc.old_path in ran:
+                return True
+            continue
+        lines = ran.get(fc.old_path)
+        if not lines:
+            continue
+        touched = fc.removed_lines() | {x for i in fc.insert_points() for x in (i - 1, i)}
+        if touched & lines:
+            return True
+    return False
+
+
 def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
     """Drop a TPC executor test when the queries the patch reaches all give the
     pinned commit's results (blast/tpcmap.py). Queries it doesn't reach can't
@@ -458,8 +493,11 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
                 env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SKIP_INTEGRATION="0", PYTHONHASHSEED="0")
                 # A patch can make a query run for minutes. The check is cut off once it has
                 # cost about what dropping the tests would save; the tests then stay.
+                setup = tpc_setup_needed(files)
+                if not setup:
+                    log(cid, "tpc check: class setup unchanged by the patch, not rebuilt")
                 r = subprocess.run([sys.executable, str(HERE / "tpcmap.py"), "check", SRC, TPC_EXPECTED],
-                                   input=pickle.dumps({"overlay": overlay, "jobs": jobs}),
+                                   input=pickle.dumps({"overlay": overlay, "jobs": jobs, "setup": setup}),
                                    capture_output=True, env=env, timeout=min(_time_left(), max(2 * est + 3, 0.8 * gain / 1000)))
                 verdict = pickle.loads(r.stdout) if r.returncode == 0 else {}
                 stats = verdict.get("_stats", {})
