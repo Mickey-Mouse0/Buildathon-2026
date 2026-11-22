@@ -288,6 +288,8 @@ TPC_EXPECTED = os.environ.get("BLAST_TPC_EXPECTED", str(HERE / "tpc_expected.pkl
 # Per-query CPU estimates, pinned in the repo (tools/record_tpc_cpu.py) so every build's
 # gate decides the same way. Measured at build they swung around the gate's cutoff.
 TPC_CPU = os.environ.get("BLAST_TPC_CPU", str(HERE / "tpc_cpu.json"))
+# Run the check only when its estimated CPU (+0.5 s) is under this share of the gain.
+TPC_GATE = 0.95
 # Off by default: on the samples and the practice set it only added CPU (checks that
 # start and then keep the test); it paid off on planted commits only.
 NO_CONSTANT_RULE = os.environ.get("BLAST_NO_CONSTANT_RULE") == "1"
@@ -418,8 +420,10 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
         rest = [x for x in chosen if x not in drop]
         gain = cost(rest, ms) - cost([x for x in rest if x not in {by_id[t] for t in jobs}], ms)
         # the check costs CPU whether or not it clears the tests, so only run it
-        # with a margin over what dropping them would save
-        if (est + 0.5) * 1000 >= 0.8 * gain:
+        # with a margin over what dropping them would save. With the pinned
+        # estimates (tpc_cpu.json) this runs a test_execute_tpcds check over its
+        # usual ~57 reached queries (~14.8 s) when dropping it saves over ~16.1 s.
+        if (est + 0.5) * 1000 >= TPC_GATE * gain:
             log(cid, f"tpc check skipped: ~{est:.1f}s of queries for {gain / 1000:.1f}s")
         elif _time_left() < 3 * est + 10:
             log(cid, f"tpc check skipped: out of time ({_time_left():.0f}s left, ~{est:.1f}s of queries)")
