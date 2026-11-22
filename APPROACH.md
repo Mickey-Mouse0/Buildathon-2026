@@ -255,3 +255,12 @@ A front query used to count as unchanged only when its whole optimized tree matc
 Measured in the image (native arm64): samples unchanged at 94.426 s. On 200 planted commits, three change (`annotate_types.py`, `qualify.py`, `normalize_identifiers.py`): `test_execute_tpcds` is dropped after the front pass alone, 40.3 s less in total. For each of the three, all 57 executed queries were run on the patched code and gave the pinned rows, and the real test was run alone under pytest: 57 subtests pass.
 
 GC settings for the check were measured too (default, disabled, frozen after the tables load): 11.1 s against 10.4 to 10.9 s for a full TPC-DS pass, so they were left alone.
+
+## TPC check: less fixed cost per pass
+
+A CPU trace on 200 planted commits put the TPC check at 63% of all CPU (22 commits). A pass that takes all 57 executed queries as far as `Plan()` cost 3.1 s in the image, of which the optimizer is only 1.65 s. Two parts of the rest are gone:
+
+- **Parsed fixture tables are cached at image build** (`tpcmap.py rows`, `tpc_rows.pkl`, 19 MB). The check always reads the pinned fixture files with this module's own parser, whatever the patch, so the rows are the same every time; only the `Table` built from them runs patched code, and it still does. Loading all tables goes from 0.48 s to 0.07 s.
+- **The tree digest is 1.7 times faster** and feeds the hash the same bytes as before (compared on 712 trees, with and without the skipped slots).
+
+Selections are identical on the samples and on the 200 planted commits; total CPU there went from 71.8 s to 65.8 s (native arm64). Tried and left out: replaying one optimizer rule from a saved tree (the rules are half the pass, and 56 of 57 saved trees came back different after pickling), and turning the collector off in the import-diff child (no change).

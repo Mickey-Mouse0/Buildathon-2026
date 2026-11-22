@@ -45,7 +45,53 @@ def open_file(file_name):
     return open(file_name, encoding="utf-8", newline="")
 
 
-def load_tables(src, fixture, schema, names=None):
+ROWS_CACHE = os.path.join(HERE, "tpc_rows.pkl")
+_rows_cache = []
+
+
+def read_rows(src, fixture, table):
+    """A fixture table's rows, parsed the way TestExecutor.setUpClass parses them."""
+    reader = csv.reader(open_file(f"{src}/tests/fixtures/optimizer/{fixture}/{table}.csv.gz"), delimiter="|")
+    rows, ctypes = [], []
+    next(reader)
+    for row in reader:
+        if not ctypes:
+            for v in row:
+                try:
+                    ctypes.append(type(ast.literal_eval(v)))
+                except (ValueError, SyntaxError):
+                    ctypes.append(str)
+        rows.append(tuple(None if (t is not str and v == "") else t(v) for t, v in zip(ctypes, row)))
+    return rows
+
+
+def save_rows(src, out):
+    """Image build: every fixture table's parsed rows. The check reads the pinned
+    fixture files with this module's own parser, whatever the patch, so the rows it
+    would parse are these; only the Table built from them runs patched code."""
+    from tests import helpers
+
+    cache = {}
+    for fixture, _, schema_name in SUITES.values():
+        for table in getattr(helpers, schema_name):
+            cache[f"{fixture}/{table}"] = pickle.dumps(read_rows(src, fixture, table), protocol=pickle.HIGHEST_PROTOCOL)
+    with open(out, "wb") as f:
+        pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"tpc rows: {len(cache)} tables, {sum(map(len, cache.values())) / 1e6:.1f} MB", file=sys.stderr)
+
+
+def cached_rows(fixture, table):
+    if not _rows_cache:
+        try:
+            with open(ROWS_CACHE, "rb") as f:
+                _rows_cache.append(pickle.load(f))
+        except (OSError, pickle.PickleError, EOFError):
+            _rows_cache.append({})
+    blob = _rows_cache[0].get(f"{fixture}/{table}")
+    return None if blob is None else pickle.loads(blob)
+
+
+def load_tables(src, fixture, schema, names=None, cache=False):
     """Same parsing as TestExecutor.setUpClass, for the tables named (or all)."""
     from sqlglot.executor.table import Table
 
@@ -53,17 +99,9 @@ def load_tables(src, fixture, schema, names=None):
     for table, columns in schema.items():
         if names is not None and table not in names:
             continue
-        reader = csv.reader(open_file(f"{src}/tests/fixtures/optimizer/{fixture}/{table}.csv.gz"), delimiter="|")
-        rows, ctypes = [], []
-        next(reader)
-        for row in reader:
-            if not ctypes:
-                for v in row:
-                    try:
-                        ctypes.append(type(ast.literal_eval(v)))
-                    except (ValueError, SyntaxError):
-                        ctypes.append(str)
-            rows.append(tuple(None if (t is not str and v == "") else t(v) for t, v in zip(ctypes, row)))
+        rows = cached_rows(fixture, table) if cache else None
+        if rows is None:
+            rows = read_rows(src, fixture, table)
         tables[table] = Table(columns=columns, rows=rows)
     return tables
 
@@ -123,48 +161,62 @@ def tree_digest(root, skip=()):
     (skip: slots that blind_slots() found they cannot read for this query)."""
     from sqlglot import exp
 
-    h = hashlib.blake2b(digest_size=16)
-    put = h.update
+    Expr = exp.Expr
+    out = []
+    add = out.append
     slots_of = {}
+    strs = {}
 
     def slots(cls):
-        r = slots_of.get(cls)
-        if r is None:
-            # subclasses repeat the base's slot names: visit each name once
-            names = dict.fromkeys(s for c in cls.__mro__ for s in getattr(c, "__slots__", None) or ())
-            r = slots_of[cls] = [s for s in names if s not in ("parent", "_hash", "__dict__", "__weakref__") and s not in skip]
+        # subclasses repeat the base's slot names: visit each name once
+        names = dict.fromkeys(s for c in cls.__mro__ for s in getattr(c, "__slots__", None) or ())
+        r = slots_of[cls] = (f"({cls.__module__}.{cls.__qualname__}".encode(),
+                             [(s, b"|" + s.encode() + b"=") for s in names
+                              if s not in ("parent", "_hash", "__dict__", "__weakref__") and s not in skip])
         return r
 
     def walk(v):
-        if isinstance(v, exp.Expr):
-            cls = type(v)
-            put(f"({cls.__module__}.{cls.__qualname__}".encode())
-            for s in slots(cls):
-                put(b"|" + s.encode() + b"=")
-                walk(getattr(v, s, None))
+        t = type(v)
+        if t is str:
+            b = strs.get(v)
+            if b is None:
+                b = strs[v] = b"str:" + repr(v).encode()
+            add(b)
+        elif v is None:
+            add(b"NoneType:None")
+        elif isinstance(v, Expr):
+            head, named = slots_of.get(t) or slots(t)
+            add(head)
+            for s, prefix in named:
+                add(prefix)
+                x = getattr(v, s, None)
+                if x is None:
+                    add(b"NoneType:None")
+                else:
+                    walk(x)
             d = getattr(v, "__dict__", None)
             if d:
                 walk(d)
-            put(b")")
+            add(b")")
         elif isinstance(v, dict):
-            put(b"{")
+            add(b"{")
             for k, x in v.items():
-                put(repr(k).encode() + b":")
+                add(repr(k).encode() + b":")
                 walk(x)
-            put(b"}")
+            add(b"}")
         elif isinstance(v, (list, tuple)):
-            put(b"[" + type(v).__name__.encode())
+            add(b"[" + t.__name__.encode())
             for x in v:
                 walk(x)
-                put(b",")
-            put(b"]")
+                add(b",")
+            add(b"]")
         elif isinstance(v, (set, frozenset)):
-            put(b"<" + repr(sorted(map(repr, v))).encode() + b">")
+            add(b"<" + repr(sorted(map(repr, v))).encode() + b">")
         else:
-            put(type(v).__name__.encode() + b":" + repr(v).encode())
+            add(t.__name__.encode() + b":" + repr(v).encode())
 
     walk(root)
-    return h.hexdigest()
+    return hashlib.blake2b(b"".join(out), digest_size=16).hexdigest()
 
 
 _SLOT_READ = re.compile(r"(?<![A-Za-z0-9_])_(type|meta)(?![A-Za-z0-9_])")
@@ -375,7 +427,7 @@ def build_expected(src, out):
         pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-def class_setup(src):
+def class_setup(src, cache=False):
     """What test_execute_tpcds's module and class setup do with sqlglot, on the patched
     code: the module's sqlglot imports, every table of both schemas built the way
     setUpClass builds them (it builds them all, TPC-H included, before any test
@@ -397,8 +449,8 @@ def class_setup(src):
             for alias in node.names:
                 if alias.name.split(".")[0] == "sqlglot":
                     importlib.import_module(alias.name)
-    load_tables(src, "tpc-h", helpers.TPCH_SCHEMA)
-    return pickle.loads(pickle.dumps(load_tables(src, "tpc-ds", helpers.TPCDS_SCHEMA)))
+    load_tables(src, "tpc-h", helpers.TPCH_SCHEMA, cache=cache)
+    return pickle.loads(pickle.dumps(load_tables(src, "tpc-ds", helpers.TPCDS_SCHEMA, cache=cache)))
 
 
 def setup_lines(src, out):
@@ -488,7 +540,7 @@ def check(src, expected_path):
     slow = False
     try:
         # skipped when the selector found the patch can't change it (setup_lines)
-        setup_tables = class_setup(src) if job.get("setup", True) else {}
+        setup_tables = class_setup(src, cache=True) if job.get("setup", True) else {}
     except BaseException as e:
         print("tpccheck: class setup", repr(e), file=sys.stderr)
         verdict = {test_id: False for test_id in job["jobs"]}
@@ -519,7 +571,7 @@ def check(src, expected_path):
                 if meta.get("execute"):
                     need = {t.name for t in find_tables(parse_one(sql))} - tables.keys()
                     if need:
-                        tables.update(pickle.loads(pickle.dumps(load_tables(src, fixture, schema, need))))
+                        tables.update(pickle.loads(pickle.dumps(load_tables(src, fixture, schema, need, cache=True))))
 
                 def at_plan(tree, tabs, exp_=exp_):
                     if exp_.get("tree") is None or tabs_shape(tabs, _hook["needed"]) != exp_["tabs"]:
@@ -617,4 +669,5 @@ if __name__ == "__main__":
     src, out = os.path.abspath(src), os.path.abspath(out)
     sys.path.insert(0, src)
     os.chdir(src)
-    {"map": build_map, "expected": build_expected, "check": check, "setup-lines": setup_lines}[cmd](src, out)
+    {"map": build_map, "expected": build_expected, "check": check, "setup-lines": setup_lines,
+     "rows": save_rows}[cmd](src, out)

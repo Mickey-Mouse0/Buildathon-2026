@@ -26,6 +26,8 @@ RUN sh /app/tools/build_importstate.sh /opt/sqlglot /app/blast/importstate.pkl \
     && PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tokreplay.py base /opt/sqlglot \
        /app/blast/tokreplay.pkl.xz /app/blast/tokreplay_base.pkl \
     && PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcmap.py expected /opt/sqlglot /app/blast/tpc_expected.pkl \
+    && (PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcmap.py rows /opt/sqlglot /app/blast/tpc_rows.pkl \
+        || (rm -f /app/blast/tpc_rows.pkl; echo "tpc rows failed: the check parses the fixture tables itself")) \
     && (PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcmap.py setup-lines /opt/sqlglot /app/blast/tpc_setup_lines.json \
         || echo "tpc setup-lines failed: every TPC check rebuilds the tables") \
     && PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcquery.py known /opt/sqlglot /app/blast/tpc_known.json \
