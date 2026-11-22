@@ -32,7 +32,10 @@ TOKREPLAY_ON = os.environ.get("BLAST_TOKREPLAY_ON", "0") == "1"
 # Replay only when the tests it could drop are worth this many times its CPU.
 REPLAY_MARGIN = float(os.environ.get("BLAST_REPLAY_MARGIN", "1.5"))
 # Only pay for an import diff (~1 s of CPU) when its fallback would cost more than this.
-DIFF_MIN_GAIN_MS = int(os.environ.get("BLAST_DIFF_MIN_GAIN_MS", "1200"))
+# Off: the diff is also what notices a patch that breaks a module's import (a planted
+# arg_types edit broke DuckDB's), where the fallback misses every test loading it. It
+# skipped 4 of 360 planted bugs, about 0.3 s of CPU per 30 commits.
+DIFF_MIN_GAIN_MS = int(os.environ.get("BLAST_DIFF_MIN_GAIN_MS", "0"))
 WORKER_MS = 2000
 MAX_WORKERS = 8
 
@@ -109,6 +112,10 @@ def cost(numbers, ms):
 _baseline = []
 _tests = []
 _last_import = []
+# Set by patched_import: the patched sqlglot failed to import (a module, or the child
+# itself). The deferred fallback then isn't a safe answer: it only covers the setting
+# reads, not the tests that load the broken module.
+_import_broke = [False]
 # The scorer stops us after 3 minutes of wall time. The child-process checks are
 # optional, so they stop starting once a share of that is gone, and a child that
 # runs long is cut off (its commit then keeps its tests).
@@ -170,15 +177,23 @@ def patched_import(files, notes, replay=None, budget=None, **replay_opts):
     # the child fingerprints dict settings key by key only where they differ from these
     want = {k: _baseline[0]["snap"][k][0] for k in _baseline[0].get("dicts", ())}
     payload = {"files": overlay, "dicts": want, "replay": replay, "budget": budget, **replay_opts}
-    r = subprocess.run([sys.executable, str(HERE / "importstate.py"), "patched", SRC],
-                       input=pickle.dumps(payload), capture_output=True, env=env,
-                       # an import takes about a second; a patch that makes it loop must not eat the run
-                       timeout=min(150 if replay is not None else 20, _time_left()))
+    _import_broke[:] = [False]
+    try:
+        r = subprocess.run([sys.executable, str(HERE / "importstate.py"), "patched", SRC],
+                           input=pickle.dumps(payload), capture_output=True, env=env,
+                           # an import takes about a second; a patch that makes it loop must not eat the run
+                           timeout=min(150 if replay is not None else 20, _time_left()))
+    except subprocess.TimeoutExpired:
+        notes.append("import diff timed out")
+        _import_broke[:] = [replay is None]
+        return None
     if r.returncode != 0:
         notes.append(f"import diff failed: {r.stderr.decode(errors='replace')[-200:]}")
+        _import_broke[:] = [True]
         return None
     after = pickle.loads(r.stdout)
     _last_import[:] = [overlay, after]
+    _import_broke[:] = [bool(set(after["fail"]) - set(_baseline[0]["fail"]))]
     return after
 
 
@@ -492,6 +507,7 @@ def main():
     for patch in sorted((DATA / "commits").glob("*.patch")):
         cid = patch.stem
         chosen = every
+        _import_broke[:] = [False]
         # read before the analyzer's try: if it fails, the TPC check below must not
         # see the previous commit's patch
         text = patch.read_text(errors="replace")
@@ -512,12 +528,16 @@ def main():
                         idx = idx | d["fallback"]
                         notes.append("import diff skipped: fallback is cheap")
                     else:
+                        _import_broke[:] = [False]
                         try:
                             extra = import_diff(analyzer, files, notes)
                         except Exception as e:
                             notes.append(f"import diff error {e!r}")
                             extra = None
-                        if extra is not None and not d["all"] and \
+                        if _import_broke[0]:
+                            idx = None if extra is None else idx | extra
+                            notes.append("import breaks: no fallback")
+                        elif extra is not None and not d["all"] and \
                                 cost(base | num(d["fallback"]), ms) < cost(base | num(extra), ms):
                             # both are safe answers; the diff can name more tests (a new
                             # class shows up in every registry it lands in)
@@ -535,7 +555,12 @@ def main():
         except Exception as e:
             log(cid, "error, running everything:", repr(e))
             chosen = every
-        if prover is not None and chosen:
+        # A patch that breaks a module's import fails every test that loads it, in ways
+        # the later checks (which reason about what the changed code computes) can't see.
+        broke = _import_broke[0]
+        if broke:
+            log(cid, "import breaks: later checks skipped")
+        if prover is not None and chosen and not broke:
             try:
                 patch_text = patch.read_text(errors="replace")
                 all_safe, why = prover.union_verdict(patch_text)
@@ -554,7 +579,7 @@ def main():
                         log(cid, "prover dropped", dropped)
             except Exception as e:
                 log(cid, "prover error, keeping the selector's tests:", repr(e))
-        if tok is not None and chosen:
+        if tok is not None and chosen and not broke:
             try:
                 tnotes = []
                 chosen = tokenizer_replay(tok, maps, patchutil.parse(patch.read_text(errors="replace")), chosen, ms, tnotes)
@@ -562,7 +587,7 @@ def main():
                     log(cid, "; ".join(tnotes))
             except Exception as e:
                 log(cid, "tokenizer replay error, keeping the tests:", repr(e))
-        if chosen and files is not None:
+        if chosen and files is not None and not broke:
             try:
                 import fixturecheck
 
@@ -573,12 +598,12 @@ def main():
                 chosen = [n for n in chosen if n not in safe]
             except Exception as e:
                 log(cid, "fixture check error, keeping the tests:", repr(e))
-        if analyzer is not None and chosen and files is not None:
+        if analyzer is not None and chosen and files is not None and not broke:
             try:
                 chosen = tpc_check(cid, analyzer, files, text, chosen, ms, by_id)
             except Exception as e:
                 log(cid, "tpc check error, keeping the tests:", repr(e))
-        if chosen and files is not None:
+        if chosen and files is not None and not broke:
             try:
                 chosen = tpc_query_edit(cid, files, chosen, ms, by_id)
             except Exception as e:

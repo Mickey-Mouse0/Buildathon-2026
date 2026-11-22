@@ -822,14 +822,37 @@ class Analyzer:
             # `from sqlglot.dialects.duckdb import X`, `from sqlglot.dialects import DuckDB`
             names = {c.split(":")[1].split(".")[0] for c in m.cls2t if c.startswith(mod + ":")}
             names.add(mod.rsplit(".", 1)[1])
-            for f, ts in m.tests_by_file.items():
+            def direct(f):
                 for node in self._test_imports(f):
                     if node is None:
                         return None
                     if node[0] == mod or (node[0] or "").startswith(mod + ".") or (
                             mod.startswith((node[0] or "") + ".") and names & node[1]):
-                        out |= ts
-                        break
+                        return True
+                return False
+            # through test helpers too: test_spark.py imports tests/dialects/test_dialect.py,
+            # which imports sqlglot.dialects.duckdb
+            hit = {}
+            def reaches(f, seen):
+                if f in hit:
+                    return hit[f]
+                r = direct(f)
+                if r is False:
+                    for g in self._test_deps(f):
+                        if g not in seen:
+                            seen.add(g)
+                            r2 = reaches(g, seen)
+                            if r2 is not False:
+                                r = r2
+                                break
+                hit[f] = r
+                return r
+            for f, ts in m.tests_by_file.items():
+                r = reaches(f, {f})
+                if r is None:
+                    return None
+                if r:
+                    out |= ts
         notes.append(f"users of modules that fail to import: {len(out)}")
         return out
 
@@ -858,6 +881,26 @@ class Analyzer:
                     where.setdefault((v[0], v[1]), set()).add(kk[1])
             self._after_vals = (asnap, where)
         return bool(self._after_vals[1].get((b[0], b[1]), set()) - {mod})
+
+    def _test_deps(self, f):
+        """Files under tests/ that test file (or helper) f imports."""
+        out = []
+        d = os.path.dirname(f)
+        while d.startswith("tests"):  # the packages it sits in are imported first
+            if os.path.exists(os.path.join(self.m.src, d, "__init__.py")):
+                out.append(f"{d}/__init__.py")
+            d = os.path.dirname(d)
+        for node in self._test_imports(f):
+            if node is None:
+                continue
+            mod, names = node
+            if not mod or not (mod == "tests" or mod.startswith("tests.")):
+                continue
+            base = mod.replace(".", "/")
+            for cand in [base + ".py", base + "/__init__.py"] + [f"{base}/{n}.py" for n in names]:
+                if os.path.exists(os.path.join(self.m.src, cand)):
+                    out.append(cand)
+        return out
 
     def _test_imports(self, f):
         """(module, imported names) for each import in test file f; [None] if unreadable."""
