@@ -138,11 +138,18 @@ def _same(a, b):
     return len(ca) == len(cb) and all(type(x) is type(y) and x == y and repr(x) == repr(y) for x, y in zip(ca, cb))
 
 
+_pinned_code = {}
+
+
 def plan(path, old_src, new_src):
     """([(old key, new code, directly changed)], why). None when the edit reaches
     beyond function bodies."""
     try:
-        o = compile(old_src, path, "exec", dont_inherit=True)
+        # the pinned file compiles the same for every commit that edits it
+        hit = _pinned_code.get(path)
+        if hit is None or hit[0] != old_src:
+            hit = _pinned_code[path] = (old_src, compile(old_src, path, "exec", dont_inherit=True))
+        o = hit[1]
         n = compile(new_src, path, "exec", dont_inherit=True)
     except (SyntaxError, ValueError) as e:
         return None, f"does not compile ({type(e).__name__})"

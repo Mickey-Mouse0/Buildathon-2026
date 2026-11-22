@@ -16,6 +16,11 @@ from targets import OPERATOR_NODES, find_targets, operator_children, target_key 
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 DOCSTRING_SENSITIVE = ("sqlglot/typing/",)
 CODING_COOKIE = re.compile(r"^[ \t\f]*#.*?coding[:=]")
+_NEWLINE = re.compile(r"\r\n|\r|\n")
+try:  # beside the selector: its parse cache; the build tools run without it
+    import srccache as _shared
+except ImportError:
+    _shared = None
 
 
 class Unprovable(Exception):
@@ -74,10 +79,61 @@ def ast_equal(a, b):
     return ast.dump(a, include_attributes=False) == ast.dump(b, include_attributes=False)
 
 
-def find_diffs(old, new):
+def source_lines(text):
+    """The file's lines as the parser numbers them (str.splitlines also breaks at form
+    feeds and other separators, which would shift every later line)."""
+    return _NEWLINE.split(text)
+
+
+def _stmt_text(lines, st):
+    start = st.decorator_list[0].lineno if getattr(st, "decorator_list", None) else st.lineno
+    return lines[start - 1:st.end_lineno]
+
+
+def _same_source(a, b, old_lines, new_lines):
+    """Two statements written with the same lines at the same columns are the same
+    tokens, so they parse to the same tree: nothing under them needs comparing."""
+    return (a.col_offset == b.col_offset and a.end_col_offset == b.end_col_offset
+            and _stmt_text(old_lines, a) == _stmt_text(new_lines, b))
+
+
+_BLOCKS = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def module_equal(old, new, old_lines, new_lines):
+    """ast_equal(old, new) for two parsed modules, without dumping all of a 9,000-line
+    file. A node's dump is its fields' dumps in order, so two statement lists dump
+    the same when they pair up equal, and a class or def when its header (the node
+    with an empty body) and its body do. Statements with the same source are skipped."""
+
+    def same(a, b):
+        if _same_source(a, b, old_lines, new_lines):
+            return True
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, _BLOCKS):
+            ha = type(a)(**{**{f: getattr(a, f) for f in a._fields}, "body": []})
+            hb = type(b)(**{**{f: getattr(b, f) for f in b._fields}, "body": []})
+            return ast_equal(ha, hb) and same_body(a.body, b.body)
+        return ast_equal(a, b)
+
+    def same_body(xs, ys):
+        return len(xs) == len(ys) and all(same(x, y) for x, y in zip(xs, ys))
+
+    if old.type_ignores or new.type_ignores:
+        return ast_equal(old, new)
+    return same_body(old.body, new.body)
+
+
+def find_diffs(old, new, old_lines=None, new_lines=None):
+    """Where the two trees differ. With the files' lines, statements whose source is
+    the same on both sides are not walked: they hold no difference."""
     diffs = []
+    prune = old_lines is not None and new_lines is not None
 
     def walk(a, b, chain):
+        if prune and isinstance(a, ast.stmt) and type(a) is type(b) and _same_source(a, b, old_lines, new_lines):
+            return
         if type(a) is not type(b):
             owner = a if isinstance(a, ast.expr) or isinstance(a, ast.stmt) else chain[-1]
             diffs.append((owner, chain if owner is chain[-1] else chain + [a]))
@@ -152,8 +208,20 @@ def pinned_side(path, old_text):
     to it, so it is parsed once per run, and so are the targets found in it."""
     hit = _pinned.get(path)
     if hit is None or hit[0] != old_text:
-        hit = _pinned[path] = (old_text, ast.parse(old_text), {})
+        tree = _shared.pinned(path, old_text) if _shared is not None else ast.parse(old_text)
+        hit = _pinned[path] = (old_text, tree, {}, source_lines(old_text))
     return hit[1], hit[2]
+
+
+def _pinned_lines(path, old_text):
+    pinned_side(path, old_text)
+    return _pinned[path][3]
+
+
+def parse_new(text):
+    """The patched file's tree. The selector's stages each parse the same patched
+    source and none of them writes to the tree, so they share one (srccache)."""
+    return _shared.patched(text) if _shared is not None else ast.parse(text)
 
 
 class FileChange:
@@ -163,9 +231,10 @@ class FileChange:
         self.path = path
         self.old_tree, self._targets = pinned_side(path, old_text)
         try:
-            self.new_tree = ast.parse(new_text)
+            self.new_tree = parse_new(new_text)
         except SyntaxError as error:
             raise Unprovable(f"{path}: patched file does not parse ({error.msg})")
+        self._lines = (_pinned_lines(path, old_text), source_lines(new_text))
         self._equal = self._diffs = None
 
     def targets(self, chain):
@@ -180,14 +249,23 @@ class FileChange:
             hit = self._targets[id(scope)] = ({id(r) for r in roots}, conditions)
         return hit
 
+    def counterpart(self, node):
+        """The node of the new tree at the same place as `node` of the old one. Every
+        heavy test asks about the same few changed expressions, so each is located once."""
+        memo = self.__dict__.setdefault("_counterparts", {})
+        hit = memo.get(id(node))
+        if hit is None or hit[0] is not node:
+            hit = memo[id(node)] = (node, counterpart(node, self.old_tree, self.new_tree))
+        return hit[1]
+
     def equal(self):
         if self._equal is None:
-            self._equal = ast_equal(self.old_tree, self.new_tree)
+            self._equal = module_equal(self.old_tree, self.new_tree, *self._lines)
         return self._equal
 
     def diffs(self):
         if self._diffs is None:
-            self._diffs = find_diffs(self.old_tree, self.new_tree)
+            self._diffs = find_diffs(self.old_tree, self.new_tree, *self._lines)
         return self._diffs
 
 
@@ -361,7 +439,7 @@ class Prover:
                 if records is None:
                     reasons.append("never evaluated by any test")
                     continue
-                new_root = counterpart(root, change.old_tree, change.new_tree)
+                new_root = change.counterpart(root)
                 ok, why = prove_expression(root, new_root, id(root) in change.targets(chain)[1], records)
                 if not ok:
                     return False, why
@@ -395,7 +473,7 @@ class Prover:
             records = profile["records"].get(number)
             if records is None:
                 return True, "changed expression never evaluated"
-            new_root = counterpart(root, change.old_tree, change.new_tree)
+            new_root = change.counterpart(root)
             ok, why = prove_expression(root, new_root, id(root) in change.targets(chain)[1], records)
             return ok, why
 
@@ -435,7 +513,7 @@ class Prover:
             st = chain[i]
         if len(stmts) != 1:
             return None
-        new_st = counterpart(st, change.old_tree, change.new_tree)
+        new_st = change.counterpart(st)
 
         def const(a):
             if not (isinstance(a, ast.Assign) and len(a.targets) == 1 and isinstance(a.targets[0], ast.Name)):

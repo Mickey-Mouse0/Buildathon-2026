@@ -38,6 +38,8 @@ REPLAY_MARGIN = float(os.environ.get("BLAST_REPLAY_MARGIN", "1.5"))
 # arg_types edit broke DuckDB's), where the fallback misses every test loading it. It
 # skipped 4 of 360 planted bugs, about 0.3 s of CPU per 30 commits.
 DIFF_MIN_GAIN_MS = int(os.environ.get("BLAST_DIFF_MIN_GAIN_MS", "0"))
+# BLAST_TIMING=1: log each commit's CPU (ours and the children already reaped) to stderr.
+TIMING = os.environ.get("BLAST_TIMING") == "1"
 WORKER_MS = 2000
 MAX_WORKERS = 8
 
@@ -294,6 +296,9 @@ TPC_CPU = os.environ.get("BLAST_TPC_CPU", str(HERE / "tpc_cpu.json"))
 TPC_GATE = float(os.environ.get("BLAST_TPC_GATE", "0.95"))
 # Off by default: on the samples and the practice set it only added CPU (checks that
 # start and then keep the test); it paid off on planted commits only.
+# BLAST_LINE_LEMMA=0: a statement counts with all of its lines, as before linelemma.py
+LINE_LEMMA = os.environ.get("BLAST_LINE_LEMMA", "1") == "1"
+TPC_LINE_LEMMA = os.environ.get("BLAST_TPC_LINE_LEMMA", "1") == "1"
 NO_CONSTANT_RULE = os.environ.get("BLAST_NO_CONSTANT_RULE") == "1"
 NO_CONSTANT_LEMMA = os.environ.get("BLAST_NO_CONSTANT_LEMMA") == "1"
 NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "1") != "1"
@@ -446,7 +451,11 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
             sub.__dict__.update({k: qm[k] for k in ("tests", "line2t", "open2t", "attr2t", "cls2t")})
             sub.tests_by_file = {}
             sub.all = frozenset(range(len(qm["tests"])))
-            return Analyzer(sub).analyze(text, files)
+            a = Analyzer(sub)
+            # the per-query maps are recorded like the main one (line events, re-armed
+            # for each query), so the one-line lemma holds for them too
+            a.line_lemma = LINE_LEMMA and TPC_LINE_LEMMA
+            return a.analyze(text, files)
 
         q, notes = reached(qm)
         if q is None:
@@ -634,6 +643,7 @@ def main():
                 log("key map failed to load, using attribute reads:", repr(e))
         analyzer = Analyzer(maps, import_diff=os.path.exists(IMPORT_STATE), keyreads=keyreads,
                             plain_setting=_plain_setting if os.path.exists(IMPORT_STATE) and not NO_CONSTANT_RULE else None)
+        analyzer.line_lemma = LINE_LEMMA
         if TOKREPLAY_ON and os.path.exists(IMPORT_STATE) and os.path.exists(TOKREPLAY) and os.path.exists(TOKREPLAY_BASE):
             tok = []  # loaded the first time a patch could use it
     except Exception as e:
@@ -654,6 +664,9 @@ def main():
     for patch in sorted((DATA / "commits").glob("*.patch")):
         cid = patch.stem
         chosen = every
+        if TIMING:
+            _c0 = resource.getrusage(resource.RUSAGE_CHILDREN)
+            _p0 = time.process_time()
         _import_broke[:] = [False]
         if analyzer is not None:
             analyzer.only_setting = None
@@ -796,6 +809,11 @@ def main():
         if workers:
             total += max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)
         print(json.dumps({"commit": cid, "workers": workers}), flush=True)
+        if TIMING:
+            _c1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+            log(cid, f"timing: self {time.process_time() - _p0:.3f}s, reaped children "
+                     f"{_c1.ru_utime + _c1.ru_stime - _c0.ru_utime - _c0.ru_stime:.3f}s, "
+                     f"cost {cost(chosen, ms) / 1000:.3f}s")
     for z in _zygote:
         z.finish()
     log(f"estimated simulated {total / 1000:.1f}s, cpu so far {time.process_time() - t0:.2f}s")

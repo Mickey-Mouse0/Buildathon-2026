@@ -20,6 +20,7 @@ import gzip
 import os
 import pickle
 
+import srccache
 from keyreads import dict_change
 
 FUNC = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -191,6 +192,11 @@ def targets_of(st):
     return {x.id for t in tg for x in ast.walk(t) if isinstance(x, ast.Name)}
 
 
+# What typing keeps on a TypedDict class about its keys, and the ways to ask for it.
+TYPING_KEYS = ("__required_keys__", "__optional_keys__", "__total__")
+TYPING_READS = TYPING_KEYS + ("is_typeddict", "__readonly_keys__", "__mutable_keys__")
+
+
 class Analyzer:
     def __init__(self, maps, import_diff=False, keyreads=None, plain_setting=None):
         self.m = maps
@@ -204,6 +210,10 @@ class Analyzer:
         # (importstate.py) and maps what differs through diff_tests().
         self.import_diff = import_diff
         self.deferred = None
+        self._patch_text = None
+        # The one-line lemma (linelemma.py) leans on how the main coverage map records
+        # lines, so only the selector's own analyzer turns it on.
+        self.line_lemma = False
 
     def defer(self, why, fallback, notes, attrs=()):
         """Leave an import-time question for the import diff. fallback = the tests to
@@ -442,6 +452,11 @@ class Analyzer:
                         continue  # mentions it only as self.x / param.x: not this global
                     if funcs_only and e[1] != path and not reach(e[1], (e[1], e[2])):
                         continue  # another module's own binding of the same name
+                    if self._lazy_loader(e[1], e[2]):
+                        # read by a module __getattr__, which runs once per name and
+                        # process (see python_file): the map can't say who relies on it
+                        notes.append(f"global {n}: read by the lazy loader of {e[1]}")
+                        return None
                     out |= m.func_range(e[1], e[2], e[4])
                 elif funcs_only:
                     continue
@@ -453,9 +468,29 @@ class Analyzer:
                     _, p, tg = e
                     tg = set(tg) - set(names)
                     if tg:
-                        out |= self.module_global(p, tg, notes, depth + 1)
+                        s = self.module_global(p, tg, notes, depth + 1)
+                        if s is None:
+                            return None
+                        out |= s
         notes.append(f"global {','.join(sorted(names))}: {len(out)}")
         return out
+
+    def _lazy_loader(self, path, start):
+        """Is the function that starts on this line a module-level __getattr__?"""
+        memo = self.__dict__.setdefault("_loaders", {})
+        if path not in memo:
+            lines = set()
+            try:
+                with open(os.path.join(self.m.src, path), encoding="utf-8") as f:
+                    text = f.read()
+                if "\ndef __getattr__(" in text or "\nasync def __getattr__(" in text:
+                    for st in ast.parse(text).body:
+                        if isinstance(st, FUNC) and st.name == "__getattr__":
+                            lines.update(range(st.decorator_list[0].lineno if st.decorator_list else st.lineno, st.end_lineno + 1))
+            except (OSError, SyntaxError, ValueError):
+                pass
+            memo[path] = lines
+        return start in memo[path]
 
     def _star_imported(self, mod):
         if not hasattr(self, "_stars"):
@@ -485,9 +520,9 @@ class Analyzer:
         if new is None:
             notes.append("patch does not apply")
             return None
-        oldt = ast.parse(old)
+        oldt = srccache.pinned(path, old)
         try:
-            newt = ast.parse(new)
+            newt = srccache.patched(new)
         except SyntaxError:
             notes.append("syntax error")
             return None
@@ -506,6 +541,11 @@ class Analyzer:
             quals = [s.name for s in chain if isinstance(s, ast.ClassDef)]
             if quals and self._constant_swap(old, new, newt, chain, removed[0], f"{modname}:{'.'.join(quals)}"):
                 swap = removed[0]
+        # changed lines answered by "tests that ran the statement", and what was left
+        # for the import diff before this file (see the end)
+        body_lines = set()
+        d = self.deferred
+        deferred_before = None if d is None else {k: v.copy() if hasattr(v, "copy") else v for k, v in d.items()}
         for l in sorted(changed):
             if swap is not None and l != swap:
                 # the lines around a one-line replacement are marked too, but here the
@@ -516,6 +556,13 @@ class Analyzer:
                 continue
             fidx = max((i for i, s in enumerate(chain) if isinstance(s, FUNC)), default=None)
             if fidx is not None:
+                if isinstance(chain[0], FUNC) and chain[0].name == "__getattr__":
+                    # A module's lazy loader stores what it finds in the module's
+                    # globals, so it runs once per process for each name and the map
+                    # credits only the first test that asked. Every later test relies
+                    # on what it returned, so everyone who uses the module is exposed.
+                    notes.append("module __getattr__: its results are cached in the module")
+                    return None
                 fn = chain[fidx]
                 start = fn.decorator_list[0].lineno if fn.decorator_list else fn.lineno
                 if fidx == len(chain) - 1 or l < fn.body[0].lineno:
@@ -556,6 +603,7 @@ class Analyzer:
                     continue
                 out |= m.lines(path, own)
                 notes.append(f"body {fn.name}")
+                body_lines.add(l)
                 continue
             st = chain[-1]
             qual = [s.name for s in chain if isinstance(s, ast.ClassDef)]
@@ -597,7 +645,24 @@ class Analyzer:
             if qual:
                 out |= self.class_attr(f"{modname}:{'.'.join(qual)}", names, notes, constant=l == swap)
             else:
-                out |= self.module_global(path, names, notes)
+                s = self.module_global(path, names, notes)
+                if s is None:
+                    return None
+                out |= s
+        if self.line_lemma and len(removed) == 1 and removed[0] in body_lines:
+            # One line replaced inside a function body. The lines next to it were marked
+            # too (the statement after it, a class setting below the method), and a
+            # statement counts with all of its lines. When the compiled code differs only
+            # in that line's instructions, the tests that ran the line are the whole
+            # answer for this file (linelemma.py), and nothing is left for the import diff.
+            narrow = m.lines(path, removed)
+            if len(narrow) < len(out) or self.deferred != deferred_before:
+                import linelemma
+
+                if linelemma.one_line(path, oldt, newt, old.split("\n"), new.split("\n")) == removed[0]:
+                    notes.append(f"line {removed[0]} only: {len(narrow)} of {len(out)}")
+                    self.deferred = deferred_before
+                    return narrow
         return out
 
     def _constant_swap(self, old, new, newt, chain, l, ck):
@@ -630,6 +695,7 @@ class Analyzer:
     def analyze(self, patch_text, files):
         """Candidate test indexes for one patch, or None for 'all'."""
         self.deferred = None
+        self._patch_text = patch_text
         # (class key, name) when what the patch changes after import is exactly one
         # plain class setting; the prover's constant lemma then may judge heavy tests
         self.only_setting = None
@@ -786,6 +852,14 @@ class Analyzer:
                     notes.append(f"import diff: new enum member {ck}.{name}: {len(s)}")
                     out |= s
                     continue
+                if (name in TYPING_KEYS and kinds == {"dunder"} and b is not None and a is not None
+                        and ("a", ck, "__total__") in bsnap and self._typing_keys_unread()):
+                    # A TypedDict's key bookkeeping (total=False to True, a key made
+                    # Required). Running code can only see it by reading these names:
+                    # a TypedDict is a plain dict when called, and its subclasses' own
+                    # copies are entries of this diff. Nothing in the repository names them.
+                    notes.append(f"import diff {ck}.{name}: TypedDict bookkeeping, read nowhere")
+                    continue
                 u = users(ck)
                 if u is None:
                     notes.append(f"import diff: {ck}.{name} changed, class has no recorded users")
@@ -803,9 +877,38 @@ class Analyzer:
                 # code in this file, unless another module star-imports this one
                 own = kinds == {"module"} and not self._star_imported(mod)
                 s = self.module_global(path, {name}, notes, own_file=own, funcs_only=True)
+                if s is None:
+                    return None
                 out |= s
         notes.append(f"import diff: {len(changed)} changed, {len(out)} tests")
         return out
+
+    def _typing_keys_unread(self):
+        """No Python file of the pinned repository, and no line of the patch, mentions
+        a TypedDict's key bookkeeping by name (or asks typing for it)."""
+        if any(w in (self._patch_text or "") for w in TYPING_READS):
+            return False
+        hit = self.__dict__.get("_typing_scan")
+        if hit is None:
+            hit = True
+            for root, dirs, files in os.walk(self.m.src):
+                dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git")]
+                for f in files:
+                    if not f.endswith((".py", ".pyi", ".toml", ".cfg", ".ini")):
+                        continue
+                    try:
+                        with open(os.path.join(root, f), encoding="utf-8", errors="replace") as fh:
+                            text = fh.read()
+                    except OSError:
+                        hit = False
+                        break
+                    if any(w in text for w in TYPING_READS):
+                        hit = False
+                        break
+                if not hit:
+                    break
+            self._typing_scan = hit
+        return hit
 
     def failed_import_users(self, failed, notes):
         """Tests that can reach a module the patch makes fail to import (sqlglot imports
@@ -814,12 +917,14 @@ class Analyzer:
         None for a module the map can't place (sqlglot itself, a package __init__)."""
         m = self.m
         out = set()
+        # first, so that the test files aren't read for an answer that is "all" anyway
+        for mod in sorted(failed):
+            if mod == "sqlglot" or not mod.startswith(DIALECT_DIRS) or m.line2t.get(mod.replace(".", "/") + ".py") is None:
+                notes.append(f"import fails in {mod}: all tests")
+                return None
         for mod in sorted(failed):
             path = mod.replace(".", "/") + ".py"
             table = m.line2t.get(path)
-            if mod == "sqlglot" or not mod.startswith(DIALECT_DIRS) or table is None:
-                notes.append(f"import fails in {mod}: all tests")
-                return None
             for c in m.cls2t:
                 if c.startswith(mod + ":"):
                     out |= m.class_usage(c)
