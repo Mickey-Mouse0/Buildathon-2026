@@ -2,7 +2,8 @@
 
     python blast/tpcmap.py map <sqlglot dir> <out tpc_map.pkl.gz>          (offline, committed)
     python blast/tpcmap.py expected <sqlglot dir> <out tpc_expected.pkl>  (image build)
-    python blast/tpcmap.py check <sqlglot dir> <expected.pkl>  < pickle {"overlay", "jobs"}
+    python blast/tpcmap.py setup-lines <sqlglot dir> <out tpc_setup_lines.json>  (image build)
+    python blast/tpcmap.py check <sqlglot dir> <expected.pkl>  < pickle {"overlay", "jobs", "setup"}
 
 test_execute_tpcds (21.5 s) and test_execute_tpch (3.9 s) run every query of a
 fixture file through parse_one, a pickle round trip (the test uses a process
@@ -309,6 +310,65 @@ def class_setup(src):
     return pickle.loads(pickle.dumps(load_tables(src, "tpc-ds", helpers.TPCDS_SCHEMA)))
 
 
+def setup_lines(src, out):
+    """Image build: the lines class_setup runs in a fresh process (sqlglot's import
+    included), widened to whole statements (a multi-line statement reports only its
+    first line; a def, class or if reports only its header). A patch that touches
+    none of them, edits no test .py file and no TPC fixture leaves class_setup exactly
+    as at the pinned commit, which passes, so the check can skip it."""
+    import threading
+
+    hit = defaultdict(set)
+    root = src.rstrip("/") + "/"
+
+    def local(frame, event, arg):
+        if event == "line":
+            hit[frame.f_code.co_filename].add(frame.f_lineno)
+        return local
+
+    def tracer(frame, event, arg):
+        f = frame.f_code.co_filename
+        if f.startswith(root):
+            hit[f].add(frame.f_lineno)
+            return local
+        return None
+
+    threading.settrace(tracer)
+    sys.settrace(tracer)
+    try:
+        class_setup(src)
+    finally:
+        sys.settrace(None)
+        threading.settrace(None)
+    lines = {}
+    for f, ls in hit.items():
+        rel = os.path.relpath(f, src)
+        if not rel.endswith(".py"):
+            continue
+        with open(f, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        starts = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.stmt):
+                first = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
+                body = getattr(node, "body", None)
+                last = body[0].lineno - 1 if isinstance(body, list) and body and isinstance(body[0], ast.stmt) \
+                    else node.end_lineno
+                for l in range(first, max(first, last) + 1):
+                    starts.setdefault(l, []).append((first, max(first, last)))
+        out_lines = set()
+        for l in ls:
+            out_lines.add(l)
+            for a, b in starts.get(l, ()):
+                out_lines.update(range(a, b + 1))
+        lines[rel] = sorted(out_lines)
+    import json
+
+    with open(out, "w") as fh:
+        json.dump(lines, fh)
+    print(f"setup lines: {sum(map(len, lines.values()))} in {len(lines)} files", file=sys.stderr)
+
+
 def check(src, expected_path):
     """Run the given queries on the patched sqlglot (served from memory) and say,
     per test, whether every one gives exactly what the pinned commit gave. Same
@@ -327,7 +387,8 @@ def check(src, expected_path):
         expected = pickle.load(f)
     verdict, stats = {}, {}
     try:
-        setup_tables = class_setup(src)
+        # skipped when the selector found the patch can't change it (setup_lines)
+        setup_tables = class_setup(src) if job.get("setup", True) else {}
     except BaseException as e:
         print("tpccheck: class setup", repr(e), file=sys.stderr)
         verdict = {test_id: False for test_id in job["jobs"]}
@@ -376,4 +437,4 @@ if __name__ == "__main__":
     src, out = os.path.abspath(src), os.path.abspath(out)
     sys.path.insert(0, src)
     os.chdir(src)
-    {"map": build_map, "expected": build_expected, "check": check}[cmd](src, out)
+    {"map": build_map, "expected": build_expected, "check": check, "setup-lines": setup_lines}[cmd](src, out)
