@@ -42,8 +42,8 @@ RUN sh /app/tools/build_importstate.sh /opt/sqlglot /app/blast/importstate.pkl \
     && python -c "import compileall; compileall.compile_dir('/opt/sqlglot/tests', quiet=1)" \
     && (PYTHONDONTWRITEBYTECODE=1 python /app/blast/runcheck.py record /opt/sqlglot /opt/tpcdeps /app/blast \
         || (rm -f /app/blast/runcheck_called.pkl /app/blast/runcheck_slices.pkl; echo "runtime check recording failed: the check stays off")) \
-    && (PYTHONDONTWRITEBYTECODE=1 python /app/blast/runcheck.py cmp /opt/sqlglot /opt/tpcdeps /app/blast \
-        || (rm -f /app/blast/runcheck_cmp.pkl; echo "comparison recording failed: the rule stays off")) \
+    && (PYTHONDONTWRITEBYTECODE=1 python /app/blast/runcheck.py shadow /opt/sqlglot /opt/tpcdeps /app/blast \
+        || (rm -f /app/blast/runcheck_shadow.pkl; echo "shadow recording failed: the rule stays off")) \
     && python /app/blast/prover/shard.py /app/blast/prover_data/profiles.pkl.xz /app/blast/prover_data/target_index.json.gz \
        /opt/sqlglot /app/blast/prover_data/profiles.shards \
     && python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/union.pkl.xz'), open('/app/blast/prover_data/union.pkl', 'wb'))" \

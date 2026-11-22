@@ -362,6 +362,11 @@ TPC_CMP = os.environ.get("BLAST_TPC_CMP", str(HERE / "tpc_cmp.pkl"))
 _tpc_cmp = []
 # the swaps a recording exists for: runcheck.record_cmp (every test), tpcmap.build_cmp
 CMP_SWAPS = {"Lt": "LtE", "LtE": "Lt", "Gt": "GtE", "GtE": "Gt", "Is": "Eq", "IsNot": "NotEq"}
+# blast/shadow.py: which tests and TPC-DS queries a one-line edit can reach
+SHADOW = os.environ.get("BLAST_SHADOW", str(HERE / "runcheck_shadow.pkl"))
+SHADOW_RULE = os.environ.get("BLAST_SHADOW_RULE", "1") == "1"
+TPCDS_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+_shadow = [None]
 CMP_TESTS = os.environ.get("BLAST_CMP_TESTS", str(HERE / "runcheck_cmp.pkl"))
 CMP_TESTS_RULE = os.environ.get("BLAST_CMP_TESTS_RULE", "1") == "1"
 _cmp_tests = []
@@ -573,6 +578,10 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
         if swapped is not None:
             q = sorted(swapped if q is None else set(q) & swapped)
             log(cid, f"tpc check: comparison swap, the two operators disagree in {len(swapped)} queries")
+        if _shadow[0] is not None and test_id == TPCDS_TEST and _shadow[0][1] and "tpcds#setup" not in _shadow[0][0]:
+            reached_q = {int(u[6:]) for u in _shadow[0][0] if u.startswith("tpcds#")}
+            q = sorted(reached_q if q is None else set(q) & reached_q)
+            log(cid, f"tpc check: shadow recording, the change can reach {len(reached_q)} queries")
         if q is None:
             log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: all queries ({'; '.join(notes[-2:])})")
             continue
@@ -853,6 +862,28 @@ def main():
         except Exception as e:
             log(cid, "error, running everything:", repr(e))
             chosen = every
+        _shadow[:] = [None]
+        if SHADOW_RULE and chosen and files is not None and len(files) == 1 and not _import_broke[0]:
+            try:
+                import shadow
+
+                got = shadow.units(SHADOW, SRC, files[0])
+                if got is not None:
+                    reach, recorded, names = got
+                    queries = [u for u in names if u.startswith("tpcds#")]
+                    whole = bool(queries) and all(u in recorded for u in queries)
+                    _shadow[:] = [(reach, whole)]
+
+                    def stays(tid):
+                        if tid == TPCDS_TEST:
+                            return not whole or any(u in reach for u in queries)
+                        return tid in reach or tid not in recorded
+
+                    kept = [n for n in chosen if stays(id_of[n])]
+                    log(cid, f"shadow recording: the change can reach {len(reach)} units; {len(chosen)} -> {len(kept)}")
+                    chosen = kept
+            except Exception as e:
+                log(cid, "shadow recording error, keeping the tests:", repr(e))
         if CMP_TESTS_RULE and chosen and files is not None and not _import_broke[0]:
             try:
                 swapped = comparison_tests(files)

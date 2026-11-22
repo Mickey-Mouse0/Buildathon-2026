@@ -805,6 +805,160 @@ def record_cmp(src, deps, out_dir):
           f"{len(at_import)} differ at import, {time.process_time() - t0:.1f}s", file=sys.stderr)
 
 
+SHADOW_SKIP = ("::test_max_nodes", "TestExecutor::test_execute_tpcds")
+TPCDS = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+
+
+SHADOW_SEEDS = (0, 1, 2)
+
+
+def record_shadow(src, deps, out_dir):
+    """Image build: blast/shadow.py's recording, made under three hash seeds and merged.
+    Set order follows the seed and can change which values a comparison sees, so a unit
+    counts as untouched by an edit only if no seed saw a difference; a unit must have
+    been recorded under every seed to count as recorded at all."""
+    import subprocess
+
+    sys.path.insert(0, HERE)
+    import shadow
+
+    parts = []
+    for seed in SHADOW_SEEDS:
+        part = os.path.join(out_dir, f"shadow_part{seed}.pkl")
+        subprocess.run([sys.executable, os.path.abspath(__file__), "shadow-part", src, deps, part],
+                       env=dict(os.environ, PYTHONHASHSEED=str(seed)), check=True)
+        with open(part, "rb") as f:
+            parts.append(pickle.load(f))
+        os.remove(part)
+    first = parts[0]
+    if any(p["sites"] != first["sites"] or p["names"] != first["names"] for p in parts):
+        raise SystemExit("shadow: the recordings do not line up")
+    recorded = set.intersection(*(p["recorded"] for p in parts))
+    at_import = set.union(*(p["at_import"] for p in parts))
+    per, values = {}, {}
+    for p in parts:
+        for code, us in p["per"].items():
+            per.setdefault(code, set()).update(us)
+    for i in set().union(*(p["values"] for p in parts)):
+        seen = {}
+        for p in parts:
+            for pairs, us in p["values"].get(i, {}).items():
+                for u in us:
+                    cur = seen.get(u, set())
+                    seen[u] = None if cur is None or pairs is None else cur | set(pairs)
+        for u, pairs in seen.items():
+            key = None if pairs is None or len(pairs) > shadow.PAIR_CAP else tuple(sorted(pairs, key=repr))
+            values.setdefault(i, {}).setdefault(key, set()).add(u)
+    shadow.package(src, first["sites"], at_import, per, values, first["names"], recorded, os.path.join(out_dir, "runcheck_shadow.pkl"))
+    print(f"runcheck shadow: {len(first['sites'])} sites, {len(recorded)} of {len(first['names'])} units recorded "
+          f"under all of {len(parts)} seeds", file=sys.stderr)
+
+
+def record_shadow_part(src, deps, out):
+    """One seed's recording. Every test, and every TPC-DS query as a unit of its own
+    ("tpcds#<n>", plus "tpcds#setup" for the tables), runs in a fork of one process
+    that has the instrumented sqlglot imported."""
+    import builtins
+
+    sys.path.insert(0, HERE)
+    import shadow
+    from importstate import _Overlay
+
+    sites, hit, pairs = [], set(), {}
+    overlay = shadow.instrument(src, sites)
+    for name, fn in shadow.hooks(sites, hit, pairs).items():
+        setattr(builtins, name, fn)
+    sys.meta_path.insert(0, _Overlay(overlay))
+    t0 = time.monotonic()
+    warm(src, deps)
+    sys.setrecursionlimit(RECURSION_LIMIT)
+    at_import = set(hit)
+    units = []
+    for name, mod in sorted(sys.modules.items()):
+        if name.startswith("tests.") and mod is not None:
+            for cname, cls in sorted(vars(mod).items()):
+                if isinstance(cls, type) and issubclass(cls, unittest.TestCase) and cls.__module__ == name:
+                    for t in unittest.TestLoader().getTestCaseNames(cls):
+                        tid = f"{name.replace('.', '/')}.py::{cname}::{t}"
+                        if not tid.endswith(SHADOW_SKIP):
+                            units.append((tid, None))
+    import tpcmap
+    from tests import helpers
+
+    hit.clear()
+    pairs.clear()
+    fixture, sqls, schema = tpcmap.suite(src, TPCDS)
+    tables = pickle.loads(pickle.dumps(tpcmap.load_tables(src, fixture, schema)))
+    tpcmap.load_tables(src, "tpc-h", helpers.TPCH_SCHEMA)
+    setup_hits = sorted(hit)
+    setup_pairs = {i: None if v is None else tuple(sorted(v, key=repr)) for i, v in pairs.items()}
+    units += [(f"tpcds#{q}", q) for q in range(len(sqls))]
+
+    def run_unit(name, q):
+        hit.clear()
+        pairs.clear()
+        if q is None:
+            bad = bool(run_tests([name], {name: 900.0}))
+        else:
+            try:
+                tpcmap.run_query(*sqls[q][:2], schema, tables)
+                bad = False
+            except Exception:
+                bad = True
+        return sorted(hit), {i: None if v is None else sorted(v, key=repr) for i, v in pairs.items()}, bad
+
+    try:
+        workers = max(1, min(8, len(os.sched_getaffinity(0))))
+    except AttributeError:
+        workers = 2
+    per, values, recorded, active = {}, {}, set(), {}
+    pending = list(enumerate(units))
+    while pending or active:
+        while pending and len(active) < workers:
+            u, (name, q) = pending.pop()
+            r, w = os.pipe()
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    os.close(r)
+                    _send(w, run_unit(name, q))
+                finally:
+                    os._exit(0)
+            os.close(w)
+            active[r] = (pid, u, time.monotonic())
+        ready = select.select(list(active), [], [], 5)[0]
+        late = [r for r, (_, _, t) in active.items() if r not in ready and time.monotonic() - t > 1500]
+        for r in ready + late:
+            pid, u, _ = active.pop(r)
+            try:
+                hits, seen, bad = _recv(r, time.monotonic() + 300) if r in ready else ([], {}, True)
+            except Exception:
+                hits, seen, bad = [], {}, True
+            os.close(r)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            os.waitpid(pid, 0)
+            if not bad:
+                recorded.add(u)
+                for code in hits:
+                    per.setdefault(code, set()).add(u)
+                for i, v in seen.items():
+                    values.setdefault(i, {}).setdefault(None if v is None else tuple(v), set()).add(u)
+    names = [name for name, _ in units] + ["tpcds#setup"]
+    recorded.add(len(names) - 1)
+    for code in setup_hits:
+        per.setdefault(code, set()).add(len(names) - 1)
+    for i, v in setup_pairs.items():
+        values.setdefault(i, {}).setdefault(v, set()).add(len(names) - 1)
+    with open(out, "wb") as f:
+        pickle.dump({"sites": sites, "names": names, "recorded": recorded, "at_import": at_import, "per": per, "values": values},
+                    f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"runcheck shadow, seed {os.environ.get('PYTHONHASHSEED')}: {len(recorded)} of {len(names)} units, "
+          f"{len(at_import)} codes hit at import, {workers} workers, {time.monotonic() - t0:.0f}s", file=sys.stderr)
+
+
 class Zygote:
     """The selector's handle on the zygote process; started at the first eligible commit."""
 
@@ -851,6 +1005,10 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "record":
         record(os.path.abspath(sys.argv[2]), sys.argv[3], os.path.abspath(sys.argv[4]))
+    elif cmd == "shadow":
+        record_shadow(os.path.abspath(sys.argv[2]), sys.argv[3], os.path.abspath(sys.argv[4]))
+    elif cmd == "shadow-part":
+        record_shadow_part(os.path.abspath(sys.argv[2]), sys.argv[3], os.path.abspath(sys.argv[4]))
     elif cmd == "cmp":
         record_cmp(os.path.abspath(sys.argv[2]), sys.argv[3], os.path.abspath(sys.argv[4]))
     elif cmd == "cold":
