@@ -130,6 +130,64 @@ def probe_why(cid, chosen, files, ms, by_id):
     return [pick] if not left else [[n]]
 
 
+def _markers(code, ms, avoid):
+    left, pick = code, []
+    for t in sorted((t for t in ms if 0 < ms[t] <= left and t != avoid), key=lambda t: (-ms[t], t)):
+        if ms[t] <= left:
+            pick.append(t)
+            left -= ms[t]
+        if not left:
+            break
+    return [pick] if not left else [[avoid]]
+
+
+def probe_tpc(cid, chosen, files, ms, by_id):
+    """PROBE "tpc": for a commit whose TPC check ran 10 or more queries in full, one
+    worker of markers adding up to  kind + 10 x area + 100 x rules + 1000 x changed;
+    every other commit prints no tests.
+      kind: 1 class setting, 2 function body, 3 def or lambda, 4 module-level name,
+            5 code that runs at import, 6 something else
+      area: 1 executor/ 2 planner.py 3 generator.py 4 generators/ 5 expressions/
+            6 optimizer/ 7 parser.py or parsers/ 8 dialects/ 9 tokens or tokenizer 0 other
+      rules: 1 the constant lemma ran, 2 the setting-site split ran, 3 both, 0 neither
+      changed: entries the import check found changed (9 for nine or more, 0 if it did not run)"""
+    import re
+
+    lines = _probe_log.get(cid, [])
+    text = "\n".join(lines)
+    ran = [int(m.group(1)) for m in re.finditer(r"tpc test_execute_tpcds: .*?(\d+) run", text)]
+    if not ran or max(ran) < 10:
+        return []
+    kind = (5 if "runs at import" in text or "factory " in text else 1 if re.search(r"\battr ", text)
+            else 4 if re.search(r"\bglobal ", text) else 2 if re.search(r"\bbody ", text)
+            else 3 if re.search(r"\b(def|lambda)\b", text) else 6)
+    path = next((p for fc in files or () for p in (fc.new_path, fc.old_path) if p and p.startswith("sqlglot/")), "")
+    area = (1 if path.startswith("sqlglot/executor/") else 2 if path == "sqlglot/planner.py" else 3 if path == "sqlglot/generator.py"
+            else 4 if path.startswith("sqlglot/generators/") else 5 if path.startswith("sqlglot/expressions/")
+            else 6 if path.startswith("sqlglot/optimizer/") else 7 if path == "sqlglot/parser.py" or path.startswith("sqlglot/parsers/")
+            else 8 if path.startswith("sqlglot/dialects/") else 9 if "token" in path else 0)
+    rules = (1 if "constant lemma (" in text else 0) + (2 if "tpc check: setting" in text else 0)
+    m = re.search(r"import diff: (\d+) changed", text)
+    code = kind + 10 * area + 100 * rules + 1000 * min(int(m.group(1)) if m else 0, 9)
+    print(cid, "PROBE tpc:", code, file=sys.stderr)
+    return _markers(code, ms, by_id.get(_TPCDS))
+
+
+def probe_small(cid, chosen, files, ms, by_id):
+    """PROBE "small": the real selection, except that a commit which edits sqlglot code,
+    costs under 4.5 s and whose tests the runtime check did not run prints no tests.
+    Commits missed = how many of those really break something; the fall in simulated
+    time (after taking 300 s per miss off) = what those commits cost us."""
+    workers = pack(chosen, ms)
+    c = (max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)) if workers else 0
+    code = files is not None and any(p and p.startswith("sqlglot/") and p.endswith(".py") for fc in files for p in (fc.old_path, fc.new_path))
+    ran = any(ln.startswith("runtime check: ran") for ln in _probe_log.get(cid, []))
+    if workers and code and c < 4500 and not ran:
+        print(cid, "PROBE small: dropped a selection of", c, "ms", file=sys.stderr)
+        return []
+    return workers
+
+
 def pack(numbers, ms):
     """Cheapest split: try 1..8 workers, longest test first onto the lightest worker."""
     if not numbers:
@@ -908,7 +966,8 @@ def main():
                 chosen = runtime_check(cid, files, chosen, ms, id_of)
             except Exception as e:
                 log(cid, "runtime check error, keeping the tests:", repr(e))
-        workers = probe_why(cid, chosen, files, ms, by_id) if PROBE == "why" else pack(chosen, ms)
+        workers = (probe_why if PROBE == "why" else probe_tpc if PROBE == "tpc" else probe_small)(cid, chosen, files, ms, by_id) \
+            if PROBE in ("why", "tpc", "small") else pack(chosen, ms)
         if workers:
             total += max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)
         print(json.dumps({"commit": cid, "workers": workers}), flush=True)
