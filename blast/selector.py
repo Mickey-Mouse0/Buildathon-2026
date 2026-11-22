@@ -294,7 +294,7 @@ TPC_GATE = 0.95
 # start and then keep the test); it paid off on planted commits only.
 NO_CONSTANT_RULE = os.environ.get("BLAST_NO_CONSTANT_RULE") == "1"
 NO_CONSTANT_LEMMA = os.environ.get("BLAST_NO_CONSTANT_LEMMA") == "1"
-NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "0") != "1"
+NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "1") != "1"
 _tpc = []
 
 
