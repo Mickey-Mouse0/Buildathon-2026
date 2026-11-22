@@ -283,6 +283,32 @@ def build_expected(src, out):
         pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+def class_setup(src):
+    """What test_execute_tpcds's module and class setup do with sqlglot, on the patched
+    code: the module's sqlglot imports, every table of both schemas built the way
+    setUpClass builds them (it builds them all, TPC-H included, before any test
+    runs), and the pickle round trip of all the TPC-DS tables that the test's process
+    pool makes. Raises where the real test would error. Returns the TPC-DS tables."""
+    import importlib
+
+    from tests import helpers
+
+    with open(os.path.join(src, "tests", "test_executor.py"), encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "sqlglot":
+            mod = importlib.import_module(node.module)
+            for alias in node.names:
+                if not hasattr(mod, alias.name):
+                    importlib.import_module(f"{node.module}.{alias.name}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "sqlglot":
+                    importlib.import_module(alias.name)
+    load_tables(src, "tpc-h", helpers.TPCH_SCHEMA)
+    return pickle.loads(pickle.dumps(load_tables(src, "tpc-ds", helpers.TPCDS_SCHEMA)))
+
+
 def check(src, expected_path):
     """Run the given queries on the patched sqlglot (served from memory) and say,
     per test, whether every one gives exactly what the pinned commit gave. Same
@@ -300,6 +326,14 @@ def check(src, expected_path):
     with open(expected_path, "rb") as f:
         expected = pickle.load(f)
     verdict, stats = {}, {}
+    try:
+        setup_tables = class_setup(src)
+    except BaseException as e:
+        print("tpccheck: class setup", repr(e), file=sys.stderr)
+        verdict = {test_id: False for test_id in job["jobs"]}
+        verdict["_stats"] = {}
+        sys.stdout.buffer.write(pickle.dumps(verdict))
+        return
     for test_id, queries in job["jobs"].items():
         ok = True
         st = stats[test_id] = {"same_tree": 0, "ran": 0}
@@ -308,9 +342,9 @@ def check(src, expected_path):
             fixture, sqls, schema = suite(src, test_id)
             from sqlglot import find_tables, parse_one
 
-            # tables load as a query first needs them, so a patch that changes an early
-            # query's result stops the check before the rest are loaded or run
-            tables = {}
+            # TPC-DS tables come from the class setup above; others load as a query
+            # first needs them
+            tables = dict(setup_tables) if fixture == "tpc-ds" else {}
             for front, q in [(True, q) for q in queries["front"]] + [(False, q) for q in queries["full"]]:
                 meta, sql, _ = sqls[q]
                 exp_ = expected[test_id][q]

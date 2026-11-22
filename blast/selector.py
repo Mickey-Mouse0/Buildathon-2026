@@ -301,6 +301,7 @@ EXECUTOR_FILE = "tests/test_executor.py"
 
 TPCDS_SQL = "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql"
 TPCDS_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+TPCH_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpch"
 # DuckDB, pandas and numpy, installed at build for blast/tpcquery.py only.
 TPC_DEPS = os.environ.get("BLAST_TPC_DEPS", "/opt/tpcdeps")
 # The check costs about 3 s of CPU plus the changed queries; ask for a clear margin.
@@ -384,6 +385,11 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
     qmaps, cpu, front_cpu = _tpc[0]
     drop, jobs, est = set(), {}, 0.0
     for test_id, qm in qmaps.items():
+        # Never dropped by this check: tpc-h.sql has no executed queries, so the check
+        # would only parse them, while the real test also builds and uses the tables.
+        # Dropping it saved nothing in 6 of 7 cases where it did.
+        if test_id == TPCH_TEST:
+            continue
         n = by_id.get(test_id)
         if n is None or n not in chosen:
             continue
