@@ -809,6 +809,7 @@ def main():
             _c0 = resource.getrusage(resource.RUSAGE_CHILDREN)
             _p0 = time.process_time()
         _import_broke[:] = [False]
+        notes = []
         if analyzer is not None:
             analyzer.only_setting = None
         # read before the analyzer's try: if it fails, the TPC check below must not
@@ -863,23 +864,46 @@ def main():
             log(cid, "error, running everything:", repr(e))
             chosen = every
         _shadow[:] = [None]
-        if SHADOW_RULE and chosen and files is not None and len(files) == 1 and not _import_broke[0]:
+        if SHADOW_RULE and chosen and files is not None and not _import_broke[0]:
             try:
                 import shadow
 
-                got = shadow.units(SHADOW, SRC, files[0])
-                if got is not None:
-                    reach, recorded, names = got
+                # Several files: if no single edit can change a unit's run, the edits
+                # together cannot either, so the answers are joined. A file whose
+                # syntax tree is unchanged reaches nothing; a data file keeps the tests
+                # that open it; anything else, and nothing is claimed.
+                reach, got, opens, ok = set(), None, set(), True
+                for fc in files:
+                    paths = {p for p in (fc.old_path, fc.new_path) if p}
+                    if all(p.startswith("sqlglot/") and p.endswith(".py") for p in paths):
+                        if len(files) > 1 and f"no-op {fc.path}" in notes:
+                            continue
+                        got = shadow.units(SHADOW, SRC, fc)
+                        if got is None:
+                            ok = False
+                            break
+                        reach |= got[0]
+                    elif len(files) > 1 and analyzer is not None and all(not p.endswith(".py") and p in maps.open2t for p in paths):
+                        opens |= {to_number[t] for p in paths for t in maps.open2t[p]}
+                    else:
+                        ok = False
+                        break
+                if ok and got is not None:
+                    _, recorded, names = got
                     queries = [u for u in names if u.startswith("tpcds#")]
                     whole = bool(queries) and all(u in recorded for u in queries)
-                    _shadow[:] = [(reach, whole)]
+                    if not opens:
+                        _shadow[:] = [(reach, whole)]
 
-                    def stays(tid):
+                    def stays(n):
+                        tid = id_of[n]
+                        if n in opens:
+                            return True
                         if tid == TPCDS_TEST:
                             return not whole or any(u in reach for u in queries)
                         return tid in reach or tid not in recorded
 
-                    kept = [n for n in chosen if stays(id_of[n])]
+                    kept = [n for n in chosen if stays(n)]
                     log(cid, f"shadow recording: the change can reach {len(reach)} units; {len(chosen)} -> {len(kept)}")
                     chosen = kept
             except Exception as e:
