@@ -276,6 +276,8 @@ class Analyzer:
                 for sc in m.subclasses.get(ck, ()):
                     out |= m.attr2t.get(f"{sc}.{name}", set())
             notes.append(f"constant setting: {len(out)} (no import diff needed)")
+            if len(own_keys) == 1:
+                self.only_setting = (ck, next(iter(own_keys)).rsplit(".", 1)[1])
             return out
         if self.import_diff and self.keyreads is not None:
             # The import diff says which settings really changed (a replaced line also
@@ -632,6 +634,9 @@ class Analyzer:
     def analyze(self, patch_text, files):
         """Candidate test indexes for one patch, or None for 'all'."""
         self.deferred = None
+        # (class key, name) when what the patch changes after import is exactly one
+        # plain class setting; the prover's constant lemma then may judge heavy tests
+        self.only_setting = None
         notes = []
         out = set()
         m = self.m
@@ -721,6 +726,11 @@ class Analyzer:
                     changed.append(k)  # an edited setting we can't compare: keep its readers
                 continue
             changed.append(k)
+        self.only_setting = None
+        if not failed and len(changed) == 1 and changed[0][0] == "a" and not realiased:
+            k = changed[0]
+            if {e[1] for e in (bsnap.get(k), asnap.get(k)) if e} == {"plain"} and bsnap.get(k) and asnap.get(k):
+                self.only_setting = (k[1], k[2])
         def users(ck):
             """Tests that read any of the class's settings, or ran a function that
             names the class (instances only come from code that names it)."""

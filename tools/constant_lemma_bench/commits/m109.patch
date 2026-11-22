@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/duckdb.py b/sqlglot/generators/duckdb.py
+index a0fa169c..9a340c35 100644
+--- a/sqlglot/generators/duckdb.py
++++ b/sqlglot/generators/duckdb.py
+@@ -1606,7 +1606,7 @@ class DuckDBGenerator(generator.Generator):
+     STRUCT_DELIMITER = ("(", ")")
+     RENAME_TABLE_WITH_DB = False
+     NVL2_SUPPORTED = False
+-    SEMI_ANTI_JOIN_WITH_SIDE = False
++    SEMI_ANTI_JOIN_WITH_SIDE = True
+     CAST_TO_INT_ROUNDS = True
+     SAFE_INT_DIVISION = True
+     TABLESAMPLE_KEYWORDS = "USING SAMPLE"

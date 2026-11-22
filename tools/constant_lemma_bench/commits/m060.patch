@@ -1,0 +1,13 @@
+diff --git a/sqlglot/parsers/spark2.py b/sqlglot/parsers/spark2.py
+index 8a8af863..a6ded4bb 100644
+--- a/sqlglot/parsers/spark2.py
++++ b/sqlglot/parsers/spark2.py
+@@ -36,7 +36,7 @@ class Spark2Parser(HiveParser):
+ 
+     NORMALIZE_DECIMAL_LITERALS = False
+     DECIMAL_LITERALS_ALLOW_NEGATIVE_SCALE = True
+-    TRIM_PATTERN_FIRST = True
++    TRIM_PATTERN_FIRST = False
+     CHANGE_COLUMN_ALTER_SYNTAX = True
+     PIVOT_COLUMN_NAMING = "agg_name_if_multiple"
+ 

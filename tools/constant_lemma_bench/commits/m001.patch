@@ -1,0 +1,13 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index fed01b2c..91d5322d 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -130,7 +130,7 @@ class Dialects(str, Enum):
+     TABLEAU = "tableau"
+     TERADATA = "teradata"
+     TRINO = "trino"
+-    TSQL = "tsql"
++    TSQL = 'tsqlx'
+     EXASOL = "exasol"
+ 
+ 

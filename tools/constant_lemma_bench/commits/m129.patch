@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/duckdb.py b/sqlglot/generators/duckdb.py
+index a0fa169c..1d1681a4 100644
+--- a/sqlglot/generators/duckdb.py
++++ b/sqlglot/generators/duckdb.py
+@@ -1630,7 +1630,7 @@ class DuckDBGenerator(generator.Generator):
+         **generator.AFTER_HAVING_MODIFIER_TRANSFORMS,
+         "sample": lambda self, e: self.sql(e, "sample"),
+     }
+-    SUPPORTS_WINDOW_EXCLUDE = True
++    SUPPORTS_WINDOW_EXCLUDE = False
+     COPY_HAS_INTO_KEYWORD = False
+     STAR_EXCEPT = "EXCLUDE"
+     PAD_FILL_PATTERN_IS_REQUIRED = True

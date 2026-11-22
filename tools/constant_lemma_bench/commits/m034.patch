@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..c4b55c3c 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -456,7 +456,7 @@ class Generator:
+     TABLESAMPLE_WITH_METHOD = True
+ 
+     # The keyword to use when specifying the seed of a sample clause
+-    TABLESAMPLE_SEED_KEYWORD = "SEED"
++    TABLESAMPLE_SEED_KEYWORD = 'SEEDx'
+ 
+     # Whether the historical data clause (AT ... / BEFORE ...) is generated after the table alias
+     HISTORICAL_DATA_POST_ALIAS = False

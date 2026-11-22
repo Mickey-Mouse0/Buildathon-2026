@@ -1,0 +1,13 @@
+diff --git a/sqlglot/tokens.py b/sqlglot/tokens.py
+index 7806999a..533e464d 100644
+--- a/sqlglot/tokens.py
++++ b/sqlglot/tokens.py
+@@ -204,7 +204,7 @@ class Tokenizer(_TokenizerBase):
+     # What an unpaired surrogate escape (e.g. \uD800) decodes to. If empty, it isn't decoded
+     LONE_SURROGATE_REPLACEMENT = ""
+ 
+-    NESTED_COMMENTS = True
++    NESTED_COMMENTS = False
+ 
+     # Whether "--" only starts a comment when followed by whitespace or a control character
+     DASH_COMMENT_REQUIRES_BOUNDARY = False

@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/duckdb.py b/sqlglot/generators/duckdb.py
+index a0fa169c..d9150d53 100644
+--- a/sqlglot/generators/duckdb.py
++++ b/sqlglot/generators/duckdb.py
+@@ -1596,7 +1596,7 @@ def _sha_sql(
+ class DuckDBGenerator(generator.Generator):
+     PARAMETER_TOKEN = "$"
+     NAMED_PLACEHOLDER_TOKEN = "$"
+-    JOIN_HINTS = False
++    JOIN_HINTS = True
+     SUPPORTS_MULTI_ARG_CHR = False
+     TABLE_HINTS = False
+     QUERY_HINTS = False

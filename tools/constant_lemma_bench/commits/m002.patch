@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/mysql.py b/sqlglot/generators/mysql.py
+index 91c1fef1..fa4c3402 100644
+--- a/sqlglot/generators/mysql.py
++++ b/sqlglot/generators/mysql.py
+@@ -129,7 +129,7 @@ class MySQLGenerator(generator.Generator):
+     JOIN_HINTS = False
+     TABLE_HINTS = True
+     DUPLICATE_KEY_UPDATE_WITH_SET = False
+-    QUERY_HINT_SEP = " "
++    QUERY_HINT_SEP = ' x'
+     VALUES_AS_TABLE = False
+     NVL2_SUPPORTED = False
+     LAST_DAY_SUPPORTS_DATE_PART = False

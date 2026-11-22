@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..eb5af52d 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -507,7 +507,7 @@ class Generator:
+     SUPPORTS_CREATE_TABLE_LIKE = True
+ 
+     # Whether ALTER TABLE ... MODIFY COLUMN column-redefinition syntax is supported
+-    SUPPORTS_MODIFY_COLUMN = False
++    SUPPORTS_MODIFY_COLUMN = True
+ 
+     # Whether ALTER TABLE ... CHANGE COLUMN column-rename-and-redefine syntax is supported
+     SUPPORTS_CHANGE_COLUMN = False

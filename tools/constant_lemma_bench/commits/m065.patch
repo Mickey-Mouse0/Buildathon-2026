@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/postgres.py b/sqlglot/generators/postgres.py
+index 1db4172c..702b2fa7 100644
+--- a/sqlglot/generators/postgres.py
++++ b/sqlglot/generators/postgres.py
+@@ -301,7 +301,7 @@ class PostgresGenerator(generator.Generator):
+     SUPPORTS_WINDOW_EXCLUDE = True
+     COPY_HAS_INTO_KEYWORD = False
+     ARRAY_CONCAT_IS_VAR_LEN = False
+-    SUPPORTS_MEDIAN = False
++    SUPPORTS_MEDIAN = True
+     ARRAY_SIZE_DIM_REQUIRED: bool | None = True
+     SUPPORTS_BETWEEN_FLAGS = True
+     INOUT_SEPARATOR = ""  # PostgreSQL uses "INOUT" (no space)

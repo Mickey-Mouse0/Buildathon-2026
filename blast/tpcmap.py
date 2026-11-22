@@ -2,7 +2,8 @@
 
     python blast/tpcmap.py map <sqlglot dir> <out tpc_map.pkl.gz>          (offline, committed)
     python blast/tpcmap.py expected <sqlglot dir> <out tpc_expected.pkl>  (image build)
-    python blast/tpcmap.py check <sqlglot dir> <expected.pkl>  < pickle {"overlay", "jobs"}
+    python blast/tpcmap.py setup-lines <sqlglot dir> <out tpc_setup_lines.json>  (image build)
+    python blast/tpcmap.py check <sqlglot dir> <expected.pkl>  < pickle {"overlay", "jobs", "setup"}
 
 test_execute_tpcds (21.5 s) and test_execute_tpch (3.9 s) run every query of a
 fixture file through parse_one, a pickle round trip (the test uses a process
@@ -84,6 +85,14 @@ class _OtherTree(BaseException):
 
 SAME = object()
 OTHER = object()
+
+
+class _Slow(BaseException):
+    """A query ran far past its pinned CPU time (check's slow_x)."""
+
+
+def _on_slow(signum, frame):
+    raise _Slow
 _hook = {"at_plan": None, "tabs": None, "needed": None, "on": False}
 
 
@@ -316,6 +325,65 @@ def class_setup(src):
     return pickle.loads(pickle.dumps(load_tables(src, "tpc-ds", helpers.TPCDS_SCHEMA)))
 
 
+def setup_lines(src, out):
+    """Image build: the lines class_setup runs in a fresh process (sqlglot's import
+    included), widened to whole statements (a multi-line statement reports only its
+    first line; a def, class or if reports only its header). A patch that touches
+    none of them, edits no test .py file and no TPC fixture leaves class_setup exactly
+    as at the pinned commit, which passes, so the check can skip it."""
+    import threading
+
+    hit = defaultdict(set)
+    root = src.rstrip("/") + "/"
+
+    def local(frame, event, arg):
+        if event == "line":
+            hit[frame.f_code.co_filename].add(frame.f_lineno)
+        return local
+
+    def tracer(frame, event, arg):
+        f = frame.f_code.co_filename
+        if f.startswith(root):
+            hit[f].add(frame.f_lineno)
+            return local
+        return None
+
+    threading.settrace(tracer)
+    sys.settrace(tracer)
+    try:
+        class_setup(src)
+    finally:
+        sys.settrace(None)
+        threading.settrace(None)
+    lines = {}
+    for f, ls in hit.items():
+        rel = os.path.relpath(f, src)
+        if not rel.endswith(".py"):
+            continue
+        with open(f, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        starts = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.stmt):
+                first = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
+                body = getattr(node, "body", None)
+                last = body[0].lineno - 1 if isinstance(body, list) and body and isinstance(body[0], ast.stmt) \
+                    else node.end_lineno
+                for l in range(first, max(first, last) + 1):
+                    starts.setdefault(l, []).append((first, max(first, last)))
+        out_lines = set()
+        for l in ls:
+            out_lines.add(l)
+            for a, b in starts.get(l, ()):
+                out_lines.update(range(a, b + 1))
+        lines[rel] = sorted(out_lines)
+    import json
+
+    with open(out, "w") as fh:
+        json.dump(lines, fh)
+    print(f"setup lines: {sum(map(len, lines.values()))} in {len(lines)} files", file=sys.stderr)
+
+
 def check(src, expected_path):
     """Run the given queries on the patched sqlglot (served from memory) and say,
     per test, whether every one gives exactly what the pinned commit gave. Same
@@ -326,42 +394,34 @@ def check(src, expected_path):
     input and run the same code, so they are skipped. Otherwise it runs in full."""
     job = pickle.load(sys.stdin.buffer)
     sys.setrecursionlimit(20000)
-    import signal
-
-    def out_of_time(*_):
-        # a patch that makes a query loop: say "kept" for everything and leave
-        print("tpccheck: out of time", file=sys.stderr)
-        sys.stdout.buffer.write(pickle.dumps({"_stats": {}}))
-        sys.stdout.buffer.flush()
-        os._exit(0)
-
-    signal.signal(signal.SIGALRM, out_of_time)
-    signal.setitimer(signal.ITIMER_REAL, job.get("front_deadline", 3600))
     sys.path.insert(0, HERE)
     from importstate import _Overlay
 
     sys.meta_path.insert(0, _Overlay({os.path.join(src, k): v for k, v in job["overlay"].items()}))
     with open(expected_path, "rb") as f:
         expected = pickle.load(f)
+    verdict, stats = {}, {}
+    # A query that takes slow_x times its pinned CPU (plus 1 s) is cut off and its test
+    # kept, instead of running on until the selector's overall timeout (0: off).
+    slow_x = job.get("slow_x", 0)
+    if slow_x:
+        import signal
+
+        signal.signal(signal.SIGPROF, _on_slow)
+    slow = False
     try:
-        setup_tables = class_setup(src)
+        # skipped when the selector found the patch can't change it (setup_lines)
+        setup_tables = class_setup(src) if job.get("setup", True) else {}
     except BaseException as e:
         print("tpccheck: class setup", repr(e), file=sys.stderr)
         verdict = {test_id: False for test_id in job["jobs"]}
         verdict["_stats"] = {}
         sys.stdout.buffer.write(pickle.dumps(verdict))
         return
-    sys.stdout.buffer.write(pickle.dumps(check_job(src, job, expected, setup_tables)))
-
-
-def check_job(src, job, expected, setup_tables):
-    """check()'s work once the patched sqlglot is in place and the tables are loaded.
-    blast/runner.py calls it in a fork of its server, where both are already there.
-    SIGALRM must have a handler that gives up: every query sets a time limit."""
-    import signal
-
-    verdict, stats = {}, {}
     for test_id, queries in job["jobs"].items():
+        if slow:  # state may be half-updated after a cut: keep the rest too
+            verdict[test_id] = False
+            continue
         ok = True
         st = stats[test_id] = {"same_tree": 0, "ran": 0}
         try:
@@ -373,15 +433,12 @@ def check_job(src, job, expected, setup_tables):
             # first needs them
             tables = dict(setup_tables) if fixture == "tpc-ds" else {}
             cpu = job.get("cpu", {}).get(test_id)
-            fcpu = job.get("front_cpu", {}).get(test_id)
 
             def one(q, front):
+                """True: same as the pinned commit. False: differs. None (front only):
+                the tree differs at Plan(), so the query must run in full to tell."""
                 meta, sql, _ = sqls[q]
                 exp_ = expected[test_id][q]
-                # a query that takes many times its usual CPU is a patch that loops
-                c = (fcpu if front else cpu) if cpu is not None and fcpu is not None else None
-                if c is not None:
-                    signal.setitimer(signal.ITIMER_REAL, 8 * c[q] + (2 if front else 5))
                 if meta.get("execute"):
                     need = {t.name for t in find_tables(parse_one(sql))} - tables.keys()
                     if need:
@@ -393,7 +450,14 @@ def check_job(src, job, expected, setup_tables):
                         raise _SameTree
                     raise _OtherTree
 
-                res, duck = run_query(meta, sql, schema, tables, at_plan if front else None)
+                if slow_x:
+                    usual = (exp_.get("front") if front else None) or exp_["cpu"]
+                    signal.setitimer(signal.ITIMER_PROF, slow_x * usual + 1.0)
+                try:
+                    res, duck = run_query(meta, sql, schema, tables, at_plan if front else None)
+                finally:
+                    if slow_x:
+                        signal.setitimer(signal.ITIMER_PROF, 0)
                 if res is OTHER:
                     return None if duck == exp_["duckdb"] else False
                 st["same_tree" if res is SAME else "ran"] += 1
@@ -402,15 +466,14 @@ def check_job(src, job, expected, setup_tables):
             # Front queries first, only as far as Plan(): about a fifth of a full run.
             # Those whose tree differs join the queries that must run in full. The
             # caller says how much CPU the full runs may cost (its estimates): once
-            # they add up to more, the test stays. The first cheap query whose tree
-            # differs runs in full right away: a patch that changes results usually
-            # changes many, and then the rest of the pass is saved.
+            # they add up to more, the test stays. As soon as one tree differs, the
+            # cheapest query that also differs runs in full: a patch that changes
+            # results usually changes many, and then the rest of the pass is saved.
             full = list(queries["full"])
             budget = job.get("full_budget", {}).get(test_id, float("inf"))
             need_s = sum(cpu[q] for q in full) if cpu is not None else 0.0
             probed = set()
-            order = queries["front"] if cpu is None else sorted(queries["front"], key=lambda q: (-cpu[q], q))
-            order = list(order)
+            order = list(queries["front"]) if cpu is None else sorted(queries["front"], key=lambda q: (-cpu[q], q))
             while order and ok:
                 if need_s > budget:
                     break
@@ -423,7 +486,6 @@ def check_job(src, job, expected, setup_tables):
                     if cpu is not None:
                         need_s += cpu[q]
                         if not probed and need_s <= budget:
-                            # the cheapest query that also differs, run in full
                             for c in sorted([q] + order, key=lambda x: (cpu[x], x)):
                                 if c != q:
                                     order.remove(c)
@@ -442,22 +504,26 @@ def check_job(src, job, expected, setup_tables):
             st["full_est"] = need_s
             if ok and need_s > budget:
                 print(f"tpccheck: queries to run in full come to over ~{need_s:.1f}s: over budget", file=sys.stderr)
+                st["over_budget"] = True
                 ok = False
             if cpu is not None:
-                # cheapest first, for the same reason
+                # cheapest first, for the same reason as the probe
                 full.sort(key=lambda q: (cpu[q], q))
-            full = [q for q in full if q not in probed]
             if ok:
                 for q in full:
-                    if one(q, False) is not True:
+                    if q not in probed and one(q, False) is not True:
                         ok = False
                         break
+        except _Slow:
+            print("tpccheck:", test_id, "query far slower than at the pinned commit", file=sys.stderr)
+            st["slow"] = True
+            slow, ok = True, False
         except Exception as e:
             print("tpccheck:", test_id, repr(e), file=sys.stderr)
             ok = False
         verdict[test_id] = ok
     verdict["_stats"] = stats
-    return verdict
+    sys.stdout.buffer.write(pickle.dumps(verdict))
 
 
 if __name__ == "__main__":
@@ -465,4 +531,4 @@ if __name__ == "__main__":
     src, out = os.path.abspath(src), os.path.abspath(out)
     sys.path.insert(0, src)
     os.chdir(src)
-    {"map": build_map, "expected": build_expected, "check": check}[cmd](src, out)
+    {"map": build_map, "expected": build_expected, "check": check, "setup-lines": setup_lines}[cmd](src, out)

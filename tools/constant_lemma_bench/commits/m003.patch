@@ -1,0 +1,13 @@
+diff --git a/sqlglot/parsers/mysql.py b/sqlglot/parsers/mysql.py
+index 3ba279ad..c0f989b9 100644
+--- a/sqlglot/parsers/mysql.py
++++ b/sqlglot/parsers/mysql.py
+@@ -338,7 +338,7 @@ class MySQLParser(parser.Parser):
+     }
+ 
+     ALTER_DROP_REQUIRES_COLUMN = False
+-    ALTER_TABLE_MIXED_ACTIONS = True
++    ALTER_TABLE_MIXED_ACTIONS = False
+     ALTER_TABLE_REQUIRES_ACTION = False
+     LOG_DEFAULTS_TO_LN = True
+     STRING_ALIASES = True

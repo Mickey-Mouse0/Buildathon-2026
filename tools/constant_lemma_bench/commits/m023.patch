@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/starrocks.py b/sqlglot/generators/starrocks.py
+index 8640977f..00993c31 100644
+--- a/sqlglot/generators/starrocks.py
++++ b/sqlglot/generators/starrocks.py
+@@ -57,7 +57,7 @@ def st_distance_sphere(self, expression: exp.StDistance) -> str:
+ 
+ class StarRocksGenerator(MySQLGenerator):
+     EXCEPT_INTERSECT_SUPPORT_ALL_CLAUSE = False
+-    JSON_TYPE_REQUIRED_FOR_EXTRACTION = False
++    JSON_TYPE_REQUIRED_FOR_EXTRACTION = True
+     VARCHAR_REQUIRES_SIZE = False
+     PARSE_JSON_NAME: str | None = "PARSE_JSON"
+     WITH_PROPERTIES_PREFIX = "PROPERTIES"

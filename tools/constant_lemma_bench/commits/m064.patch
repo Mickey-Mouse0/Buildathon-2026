@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/presto.py b/sqlglot/generators/presto.py
+index 5a0872a6..0250598c 100644
+--- a/sqlglot/generators/presto.py
++++ b/sqlglot/generators/presto.py
+@@ -279,7 +279,7 @@ class PrestoGenerator(generator.Generator):
+     CAST_TO_INT_ROUNDS = True
+     TABLE_HINTS = False
+     QUERY_HINTS = False
+-    IS_BOOL_ALLOWED = False
++    IS_BOOL_ALLOWED = True
+     TZ_TO_WITH_TIME_ZONE = True
+     NVL2_SUPPORTED = False
+     STRUCT_DELIMITER = ("(", ")")

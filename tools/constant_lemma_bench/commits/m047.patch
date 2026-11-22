@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..3d5c6880 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -662,7 +662,7 @@ class Generator:
+     SET_ASSIGNMENT_REQUIRES_VARIABLE_KEYWORD = False
+ 
+     # The keyword to use for default value assignment in DECLARE statements
+-    DECLARE_DEFAULT_ASSIGNMENT = "="
++    DECLARE_DEFAULT_ASSIGNMENT = '=x'
+ 
+     # Whether FROM is supported in UPDATE statements or if joins must be generated instead, e.g:
+     # Supported (Postgres, Doris etc): UPDATE t1 SET t1.a = t2.b FROM t2

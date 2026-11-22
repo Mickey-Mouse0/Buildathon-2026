@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/bigquery.py b/sqlglot/generators/bigquery.py
+index bb1a4c1f..77b5f702 100644
+--- a/sqlglot/generators/bigquery.py
++++ b/sqlglot/generators/bigquery.py
+@@ -337,7 +337,7 @@ def _json_extract_sql(self: BigQueryGenerator, expression: JSON_EXTRACT_TYPE) ->
+ 
+ 
+ class BigQueryGenerator(generator.Generator):
+-    TRY_SUPPORTED = False
++    TRY_SUPPORTED = True
+     SUPPORTS_UESCAPE = False
+     SUPPORTS_DECODE_CASE = False
+     SUPPORTS_MULTI_ARG_CHR = False

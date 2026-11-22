@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..f43f649e 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -429,7 +429,7 @@ class Generator:
+     ALTER_TABLE_INCLUDE_COLUMN_KEYWORD = True
+ 
+     # Whether ALTER TABLE mutli-column additions are wrapped in parentheses.
+-    ALTER_TABLE_ADD_COLUMNS_WRAPPED = True
++    ALTER_TABLE_ADD_COLUMNS_WRAPPED = False
+ 
+     # UNNEST WITH ORDINALITY (presto) instead of UNNEST WITH OFFSET (bigquery)
+     UNNEST_WITH_ORDINALITY = True

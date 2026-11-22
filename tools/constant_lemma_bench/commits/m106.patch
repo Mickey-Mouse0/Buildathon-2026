@@ -1,0 +1,13 @@
+diff --git a/sqlglot/parsers/duckdb.py b/sqlglot/parsers/duckdb.py
+index 88a17c4c..6a307eee 100644
+--- a/sqlglot/parsers/duckdb.py
++++ b/sqlglot/parsers/duckdb.py
+@@ -127,7 +127,7 @@ class DuckDBParser(parser.Parser):
+     MAP_KEYS_ARE_ARBITRARY_EXPRESSIONS = True
+     PIVOT_COLUMN_NAMING = "agg_name_if_aliased_or_multiple"
+ 
+-    SUPPORTS_DIRECTED_JOIN = False
++    SUPPORTS_DIRECTED_JOIN = True
+ 
+     JOIN_KINDS = parser.Parser.JOIN_KINDS - {TokenType.STRAIGHT_JOIN}
+ 

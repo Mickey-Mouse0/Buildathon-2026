@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/drill.py b/sqlglot/generators/drill.py
+index e39f4085..d4cf5154 100644
+--- a/sqlglot/generators/drill.py
++++ b/sqlglot/generators/drill.py
+@@ -38,7 +38,7 @@ class DrillGenerator(generator.Generator):
+     JOIN_HINTS = False
+     TABLE_HINTS = False
+     QUERY_HINTS = False
+-    NVL2_SUPPORTED = False
++    NVL2_SUPPORTED = True
+     LAST_DAY_SUPPORTS_DATE_PART = False
+     SUPPORTS_CREATE_TABLE_LIKE = False
+     ARRAY_SIZE_NAME = "REPEATED_COUNT"

@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/hive.py b/sqlglot/generators/hive.py
+index 20a071db..19937605 100644
+--- a/sqlglot/generators/hive.py
++++ b/sqlglot/generators/hive.py
+@@ -244,7 +244,7 @@ class HiveGenerator(generator.Generator):
+     JSON_PATH_SINGLE_QUOTE_ESCAPE = True
+     SAFE_JSON_PATH_KEY_RE = re.compile(r"^[_\-a-zA-Z][\-\w]*$")
+     SUPPORTS_TO_NUMBER = False
+-    WITH_PROPERTIES_PREFIX = "TBLPROPERTIES"
++    WITH_PROPERTIES_PREFIX = 'TBLPROPERTIESx'
+     PARSE_JSON_NAME: str | None = "PARSE_JSON"
+     PAD_FILL_PATTERN_IS_REQUIRED = True
+     SUPPORTS_MEDIAN = False

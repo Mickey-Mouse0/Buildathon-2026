@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..1ad3f188 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -465,7 +465,7 @@ class Generator:
+     COLLATE_IS_FUNC = False
+ 
+     # Whether data types support additional specifiers like e.g. CHAR or BYTE (oracle)
+-    DATA_TYPE_SPECIFIERS_ALLOWED = False
++    DATA_TYPE_SPECIFIERS_ALLOWED = True
+ 
+     # Whether conditions require booleans WHERE x = 0 vs WHERE x
+     ENSURE_BOOLS = False

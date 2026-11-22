@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/duckdb.py b/sqlglot/generators/duckdb.py
+index a0fa169c..e8f5321c 100644
+--- a/sqlglot/generators/duckdb.py
++++ b/sqlglot/generators/duckdb.py
+@@ -1633,7 +1633,7 @@ class DuckDBGenerator(generator.Generator):
+     SUPPORTS_WINDOW_EXCLUDE = True
+     COPY_HAS_INTO_KEYWORD = False
+     STAR_EXCEPT = "EXCLUDE"
+-    PAD_FILL_PATTERN_IS_REQUIRED = True
++    PAD_FILL_PATTERN_IS_REQUIRED = False
+     ARRAY_SIZE_DIM_REQUIRED: bool | None = False
+     NORMALIZE_EXTRACT_DATE_PARTS = True
+     SUPPORTS_LIKE_QUANTIFIERS = False

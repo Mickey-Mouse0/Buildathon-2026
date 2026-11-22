@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/duckdb.py b/sqlglot/generators/duckdb.py
+index a0fa169c..58f927a6 100644
+--- a/sqlglot/generators/duckdb.py
++++ b/sqlglot/generators/duckdb.py
+@@ -1622,7 +1622,7 @@ class DuckDBGenerator(generator.Generator):
+     SUPPORTS_TO_NUMBER = False
+     SELECT_KINDS = ()
+     SUPPORTS_DECODE_CASE = False
+-    SUPPORTS_DROP_ALTER_ICEBERG_PROPERTY = False
++    SUPPORTS_DROP_ALTER_ICEBERG_PROPERTY = True
+ 
+     # USING SAMPLE goes after QUALIFY and before ORDER BY / LIMIT
+     # https://duckdb.org/docs/preview/sql/query_syntax/sample

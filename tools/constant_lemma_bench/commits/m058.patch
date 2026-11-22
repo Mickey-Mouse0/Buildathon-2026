@@ -1,0 +1,13 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index fed01b2c..d374f6d5 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -844,7 +844,7 @@ class Dialect(metaclass=_Dialect):
+     REGEXP_EXTRACT_NO_MATCH_RETURNS_NULL = True
+     """Whether REGEXP_EXTRACT returns NULL rather than an empty string when the pattern does not match."""
+ 
+-    REGEXP_EXTRACT_MISSING_GROUP_RETURNS_EMPTY = False
++    REGEXP_EXTRACT_MISSING_GROUP_RETURNS_EMPTY = True
+     """Whether REGEXP_EXTRACT returns an empty string for a non-participating capture group."""
+ 
+     SET_OP_DISTINCT_BY_DEFAULT: dict[Type[exp.Expr], bool | None] = {

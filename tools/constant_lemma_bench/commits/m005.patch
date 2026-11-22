@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..129b9bcb 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -544,7 +544,7 @@ class Generator:
+     SUPPORTED_JSON_PATH_PARTS: t.ClassVar = ALL_JSON_PATH_PARTS.copy()
+ 
+     # Whether any(f(x) for x in array) can be implemented by this dialect
+-    CAN_IMPLEMENT_ARRAY_ANY = False
++    CAN_IMPLEMENT_ARRAY_ANY = True
+ 
+     # Whether the function TO_NUMBER is supported
+     SUPPORTS_TO_NUMBER = True
