@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/duckdb.py b/sqlglot/generators/duckdb.py
+index a0fa169c..731a3ae4 100644
+--- a/sqlglot/generators/duckdb.py
++++ b/sqlglot/generators/duckdb.py
+@@ -1618,7 +1618,7 @@ class DuckDBGenerator(generator.Generator):
+     JSON_PATH_BRACKETED_KEY_SUPPORTED = False
+     SUPPORTS_CREATE_TABLE_LIKE = False
+     MULTI_ARG_DISTINCT = False
+-    CAN_IMPLEMENT_ARRAY_ANY = True
++    CAN_IMPLEMENT_ARRAY_ANY = False
+     SUPPORTS_TO_NUMBER = False
+     SELECT_KINDS = ()
+     SUPPORTS_DECODE_CASE = False

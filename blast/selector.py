@@ -293,6 +293,7 @@ TPC_GATE = 0.95
 # Off by default: on the samples and the practice set it only added CPU (checks that
 # start and then keep the test); it paid off on planted commits only.
 NO_CONSTANT_RULE = os.environ.get("BLAST_NO_CONSTANT_RULE") == "1"
+NO_CONSTANT_LEMMA = os.environ.get("BLAST_NO_CONSTANT_LEMMA") == "1"
 NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "0") != "1"
 _tpc = []
 
@@ -518,6 +519,8 @@ def main():
         cid = patch.stem
         chosen = every
         _import_broke[:] = [False]
+        if analyzer is not None:
+            analyzer.only_setting = None
         # read before the analyzer's try: if it fails, the TPC check below must not
         # see the previous commit's patch
         text = patch.read_text(errors="replace")
@@ -593,6 +596,16 @@ def main():
                         log(cid, "prover dropped", dropped)
             except Exception as e:
                 log(cid, "prover error, keeping the selector's tests:", repr(e))
+        only = getattr(analyzer, "only_setting", None) if analyzer is not None else None
+        if prover is not None and only is not None and chosen and not broke and files is not None and not NO_CONSTANT_LEMMA:
+            try:
+                safe, why = prover.constant_verdict(patch.read_text(errors="replace"), only[0],
+                                                    [n for n in chosen if n in prover.profiles])
+                if safe:
+                    chosen = [n for n in chosen if n not in safe]
+                log(cid, f"constant lemma ({why}): dropped {sorted(safe)}")
+            except Exception as e:
+                log(cid, "constant lemma error, keeping the tests:", repr(e))
         if tok is not None and chosen and not broke and files is not None:
             try:
                 tnotes = []

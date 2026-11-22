@@ -32,6 +32,7 @@ RUN sh /app/tools/build_importstate.sh /opt/sqlglot /app/blast/importstate.pkl \
     && python /app/blast/prover/shard.py /app/blast/prover_data/profiles.pkl.xz /app/blast/prover_data/target_index.json.gz \
        /opt/sqlglot /app/blast/prover_data/profiles.shards \
     && python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/union.pkl.xz'), open('/app/blast/prover_data/union.pkl', 'wb'))" \
+    && python /app/blast/prover/prove.py reads-index /opt/sqlglot /app/blast/prover_data/reads_index.pkl \
     && rm /app/blast/prover_data/profiles.pkl.xz /app/blast/prover_data/union.pkl.xz \
     && python -c "import sys; sys.path.insert(0, '/app/blast'); import analyze; analyze.split_map('/app/blast/covmap.pkl.gz')" \
     && chmod -R a+rX /app \

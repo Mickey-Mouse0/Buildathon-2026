@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/spark2.py b/sqlglot/generators/spark2.py
+index 1871ca77..689e1dae 100644
+--- a/sqlglot/generators/spark2.py
++++ b/sqlglot/generators/spark2.py
+@@ -237,7 +237,7 @@ class Spark2Generator(HiveGenerator):
+     }
+ 
+     WRAP_DERIVED_VALUES = False
+-    CREATE_FUNCTION_RETURN_AS = False
++    CREATE_FUNCTION_RETURN_AS = True
+ 
+     def format_sql(self, expression: exp.Format) -> str:
+         if expression.args.get("is_fmt"):

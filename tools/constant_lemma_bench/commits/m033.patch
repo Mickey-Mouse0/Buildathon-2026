@@ -1,0 +1,13 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index fed01b2c..c02a3b6c 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -967,7 +967,7 @@ class Dialect(metaclass=_Dialect):
+     QUOTE_START = "'"
+     QUOTE_END = "'"
+     IDENTIFIER_START = '"'
+-    IDENTIFIER_END = '"'
++    IDENTIFIER_END = '"x'
+ 
+     VALID_INTERVAL_UNITS: set[str] = set()
+ 

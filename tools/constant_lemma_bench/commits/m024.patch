@@ -1,0 +1,13 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index fed01b2c..27154597 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -102,7 +102,7 @@ class Dialects(str, Enum):
+ 
+     ATHENA = "athena"
+     BIGQUERY = "bigquery"
+-    CLICKHOUSE = "clickhouse"
++    CLICKHOUSE = 'clickhousex'
+     DATABRICKS = "databricks"
+     DAX = "dax"
+     DORIS = "doris"

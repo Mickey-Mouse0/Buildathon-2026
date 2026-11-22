@@ -1,0 +1,13 @@
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+index 456314b2..1b469bda 100644
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -1067,7 +1067,7 @@ class Parser:
+ 
+     JOIN_HINTS: t.ClassVar[set[str]] = set()
+ 
+-    SUPPORTS_DIRECTED_JOIN = True
++    SUPPORTS_DIRECTED_JOIN = False
+ 
+     # Tokens that unambiguously end a table reference on the fast path
+     TABLE_TERMINATORS: t.ClassVar[frozenset] = frozenset(

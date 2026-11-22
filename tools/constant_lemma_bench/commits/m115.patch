@@ -1,0 +1,13 @@
+diff --git a/sqlglot/parsers/duckdb.py b/sqlglot/parsers/duckdb.py
+index 88a17c4c..486c768d 100644
+--- a/sqlglot/parsers/duckdb.py
++++ b/sqlglot/parsers/duckdb.py
+@@ -120,7 +120,7 @@ _parse_regexp_full_match = binary_range_parser(exp.RegexpFullMatch)
+ 
+ 
+ class DuckDBParser(parser.Parser):
+-    SUPPORTS_TABLE_QUERY = True
++    SUPPORTS_TABLE_QUERY = False
+ 
+     IS_PREDICATE_PRECEDENCE = IsPredicatePrecedence.LOW
+ 

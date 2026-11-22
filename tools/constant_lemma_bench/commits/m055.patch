@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/sqlite.py b/sqlglot/generators/sqlite.py
+index b46c7ae6..8ed59df5 100644
+--- a/sqlglot/generators/sqlite.py
++++ b/sqlglot/generators/sqlite.py
+@@ -197,7 +197,7 @@ class SQLiteGenerator(generator.Generator):
+         exp.WithoutRowidProperty: exp.Properties.Location.POST_SCHEMA,
+     }
+ 
+-    LIMIT_FETCH = "LIMIT"
++    LIMIT_FETCH = 'LIMITx'
+ 
+     def root_properties(self, properties: exp.Properties) -> str:
+         return self.expressions(properties, indent=False, sep=", ")

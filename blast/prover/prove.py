@@ -409,6 +409,195 @@ class Prover:
                 return True, "changed statement never executed"
         return False, "no lemma applies"
 
+    # ---- constant lemma ---------------------------------------------------------
+    def constant_swap(self, patch_text, ck):
+        """(name, new value) when the patch's only change is one class-level
+        `NAME = constant` line of class ck ("module:Qual.Name") going to another constant."""
+        changes, affected, notes = self.analyze(patch_text)
+        if affected or notes or len(changes) != 1:
+            return None
+        change = changes[0]
+        mod, qual = ck.split(":")
+        if change.path[:-3].replace("/", ".").removesuffix(".__init__") != mod:
+            return None
+        diffs = change.diffs()
+        if not diffs:
+            return None
+        stmts = set()
+        for owner, chain in diffs:
+            # chain: Module, ClassDef..., Assign, (value)
+            i = next((j for j, n in enumerate(chain) if isinstance(n, ast.Assign)), None)
+            if i is None or not all(isinstance(n, ast.ClassDef) for n in chain[1:i]) or not isinstance(chain[0], ast.Module):
+                return None
+            if ".".join(n.name for n in chain[1:i]) != qual:
+                return None
+            stmts.add(id(chain[i]))
+            st = chain[i]
+        if len(stmts) != 1:
+            return None
+        new_st = counterpart(st, change.old_tree, change.new_tree)
+
+        def const(a):
+            if not (isinstance(a, ast.Assign) and len(a.targets) == 1 and isinstance(a.targets[0], ast.Name)):
+                return None
+            v = a.value
+            if isinstance(v, ast.UnaryOp) and isinstance(v.op, (ast.USub, ast.UAdd)) and isinstance(v.operand, ast.Constant):
+                v = ast.Constant(-v.operand.value if isinstance(v.op, ast.USub) else v.operand.value)
+            if not (isinstance(v, ast.Constant) and isinstance(v.value, (bool, int, float, str, type(None)))):
+                return None
+            return a.targets[0].id, v.value
+
+        o, n = const(st), const(new_st)
+        if o is None or n is None or o[0] != n[0] or (type(o[1]), o[1]) == (type(n[1]), n[1]):
+            return None
+        return n
+
+    _reads = None
+
+    def _read_sites(self, name):
+        """{path: [(line, col, end col)]} of every `.name` read in sqlglot, from the
+        index made at image build, or None when the name is also used some way the
+        lemma can't follow (a string naming it, a write, a read outside a function
+        body, a read spanning lines)."""
+        if self._reads is None:
+            path = Path(__file__).resolve().parent.parent / "prover_data" / "reads_index.pkl"
+            with open(path, "rb") as f:
+                self._reads = pickle.load(f)
+        if name in self._reads["bad"]:
+            return None
+        return self._reads["reads"].get(name, {})
+
+    def constant_verdict(self, patch_text, ck, candidates):
+        """Heavy tests among candidates that provably can't see class setting ck's
+        constant change: every `.NAME` read in sqlglot, replaced by the new constant,
+        leaves each expression the test evaluated with the same recorded value (or
+        was never run by it). The caller vouches that nothing else differs after
+        import (the analyzer's constant rule or the import diff)."""
+        import copy
+
+        swap = self.constant_swap(patch_text, ck)
+        if swap is None:
+            return {}, "not a single constant swap"
+        name, value = swap
+        sites = self._read_sites(name)
+        if sites is None:
+            return {}, f"{name} is read some other way"
+        checks = []  # (path, root, new_root, is_condition, statement range or None)
+        for path, spots in sites.items():
+            text = (self.sqlglot_dir / path).read_text()
+            tree, _ = pinned_side(path, text)
+            fc = FileChange.__new__(FileChange)
+            fc.path, fc.old_tree, fc._targets = path, *pinned_side(path, text)
+            want = set(map(tuple, spots))
+            found = []
+            keep = (ast.expr, ast.stmt, ast.mod, ast.comprehension, ast.arguments, ast.excepthandler, ast.keyword, ast.arg)
+
+            def walk(node, chain):
+                here = chain + [node] if isinstance(node, keep) else chain
+                if isinstance(node, ast.Attribute) and node.attr == name and (node.lineno, node.col_offset, node.end_col_offset) in want:
+                    found.append(here)
+                for child in ast.iter_child_nodes(node):
+                    walk(child, here)
+
+            walk(tree, [])
+            if len(found) != len(want):
+                return {}, "index does not match the source"
+            for chain in found:
+                site = chain[-1]
+                root = self.replay_root(fc, chain)
+                if root is None:
+                    statement = next((n for n in reversed(chain) if isinstance(n, ast.stmt)), None)
+                    if statement is None or not self._function_body(chain, statement):
+                        return {}, "a read outside any replayable expression or function body"
+                    body = getattr(statement, "body", None)
+                    end = body[0].lineno - 1 if body else statement.end_lineno
+                    if any(n in self.import_lines.get(path, set()) for n in range(statement.lineno, end + 1)):
+                        return {}, "a read runs at import"
+                    checks.append((path, None, None, None, (statement.lineno, end)))
+                    continue
+                if sum(isinstance(x, ast.Attribute) and x.attr == name for x in ast.walk(root)) > 1:
+                    many = True
+                else:
+                    many = False
+                # the root with this read replaced by the new constant
+                new_root = copy.deepcopy(root)
+                pairs = list(zip(ast.walk(root), ast.walk(new_root)))
+                twin = next(b for a, b in pairs if a is site)
+                parent = next(b for a, b in pairs for f, v in ast.iter_fields(b)
+                              if v is twin or (isinstance(v, list) and any(x is twin for x in v))) if twin is not new_root else None
+                if parent is None:
+                    new_root = ast.Constant(value)
+                else:
+                    for f, v in ast.iter_fields(parent):
+                        if v is twin:
+                            setattr(parent, f, ast.Constant(value))
+                        elif isinstance(v, list):
+                            v[:] = [ast.Constant(value) if x is twin else x for x in v]
+                cond = id(root) in fc.targets(chain)[1]
+                checks.append((path, root, new_root, cond, "many" if many else None))
+        safe = {}
+        for test in candidates:
+            if test not in self.profiles:
+                continue
+            tf = self.sqlglot_dir / self.tests[test]["file"]
+            try:
+                if any(re.search(rf"\b{re.escape(name)}\b", f.read_text()) for f in (tf, self.sqlglot_dir / "tests" / "helpers.py")):
+                    continue
+            except OSError:
+                continue
+            reasons = []
+            for path, root, new_root, cond, extra in checks:
+                if root is None:
+                    ok = not self.covers(test, path, *extra)
+                    why = "read never executed"
+                else:
+                    profile = self.profiles[test]
+                    if hasattr(profile, "part"):
+                        profile = profile.part(path)
+                    number = self.number_of_key.get(target_key(path, root))
+                    if number is None or number in profile["overflow"] or number in profile.get("raised", ()):
+                        ok, why = False, "not provable"
+                    else:
+                        records = profile["records"].get(number)
+                        if records is None:
+                            ok, why = True, "changed expression never evaluated"
+                        elif extra == "many":
+                            ok, why = False, "two reads in one expression"
+                        else:
+                            ok, why = prove_expression(root, new_root, cond, records)
+                if not ok:
+                    break
+                reasons.append(why)
+            else:
+                safe[test] = f"{name} -> {value!r}: " + ("; ".join(sorted(set(reasons))) or "never read")
+        return safe, f"{name} -> {value!r} over {len(checks)} reads"
+
+    @staticmethod
+    def build_reads_index(sqlglot_dir, out):
+        """Image build: every `.NAME` attribute read in sqlglot, by name, and the names
+        used some way constant_verdict can't follow."""
+        sqlglot_dir = Path(sqlglot_dir)
+        reads, bad = {}, set()
+        for f in sorted((sqlglot_dir / "sqlglot").rglob("*.py")):
+            path = f.relative_to(sqlglot_dir).as_posix()
+            tree = ast.parse(f.read_text())
+
+            def walk(node, in_func):
+                for child in ast.iter_child_nodes(node):
+                    if isinstance(child, ast.Constant) and isinstance(child.value, str) and child.value.isidentifier():
+                        bad.add(child.value)
+                    if isinstance(child, ast.Attribute):
+                        if not isinstance(child.ctx, ast.Load) or not in_func or child.lineno != child.end_lineno:
+                            bad.add(child.attr)
+                        else:
+                            reads.setdefault(child.attr, {}).setdefault(path, []).append(
+                                (child.lineno, child.col_offset, child.end_col_offset))
+                    walk(child, in_func or isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)))
+
+            walk(tree, False)
+        with open(out, "wb") as fh:
+            pickle.dump({"reads": reads, "bad": bad}, fh, protocol=pickle.HIGHEST_PROTOCOL)
+
     @staticmethod
     def _function_body(chain, statement):
         for i, node in enumerate(chain):
@@ -478,6 +667,9 @@ def load_prover(args):
 
 
 def main():
+    if sys.argv[1:2] == ["reads-index"]:
+        Prover.build_reads_index(sys.argv[2], sys.argv[3])
+        return
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", default=os.environ.get("DATA_DIR", "/data"))
     parser.add_argument("--tests")

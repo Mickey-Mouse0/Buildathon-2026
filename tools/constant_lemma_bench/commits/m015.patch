@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/postgres.py b/sqlglot/generators/postgres.py
+index 1db4172c..79223dfe 100644
+--- a/sqlglot/generators/postgres.py
++++ b/sqlglot/generators/postgres.py
+@@ -281,7 +281,7 @@ class PostgresGenerator(generator.Generator):
+ 
+     AFTER_HAVING_MODIFIER_TRANSFORMS = generator.AFTER_HAVING_MODIFIER_TRANSFORMS
+ 
+-    SINGLE_STRING_INTERVAL = True
++    SINGLE_STRING_INTERVAL = False
+     RENAME_TABLE_WITH_DB = False
+     LOCKING_READS_SUPPORTED = True
+     JOIN_HINTS = False

@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/duckdb.py b/sqlglot/generators/duckdb.py
+index a0fa169c..6e69e515 100644
+--- a/sqlglot/generators/duckdb.py
++++ b/sqlglot/generators/duckdb.py
+@@ -1598,7 +1598,7 @@ class DuckDBGenerator(generator.Generator):
+     NAMED_PLACEHOLDER_TOKEN = "$"
+     JOIN_HINTS = False
+     SUPPORTS_MULTI_ARG_CHR = False
+-    TABLE_HINTS = False
++    TABLE_HINTS = True
+     QUERY_HINTS = False
+     LIMIT_FETCH = "LIMIT"
+     SUPPORTS_NEAREST_JOIN = True

@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..bf8e466b 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -603,7 +603,7 @@ class Generator:
+     SUPPORTS_EXPLODING_PROJECTIONS = True
+ 
+     # Whether ARRAY_CONCAT can be generated with varlen args or if it should be reduced to 2-arg version
+-    ARRAY_CONCAT_IS_VAR_LEN = True
++    ARRAY_CONCAT_IS_VAR_LEN = False
+ 
+     # Whether CONVERT_TIMEZONE() is supported; if not, it will be generated as exp.AtTimeZone
+     SUPPORTS_CONVERT_TIMEZONE = False

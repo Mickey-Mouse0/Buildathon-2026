@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/tableau.py b/sqlglot/generators/tableau.py
+index f7c13203..2c500f9f 100644
+--- a/sqlglot/generators/tableau.py
++++ b/sqlglot/generators/tableau.py
+@@ -13,7 +13,7 @@ class TableauGenerator(generator.Generator):
+ 
+     AFTER_HAVING_MODIFIER_TRANSFORMS = generator.AFTER_HAVING_MODIFIER_TRANSFORMS
+ 
+-    JOIN_HINTS = False
++    JOIN_HINTS = True
+     TABLE_HINTS = False
+     QUERY_HINTS = False
+ 

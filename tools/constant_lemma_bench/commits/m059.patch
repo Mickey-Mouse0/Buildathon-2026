@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/redshift.py b/sqlglot/generators/redshift.py
+index cd45e522..e52144ca 100644
+--- a/sqlglot/generators/redshift.py
++++ b/sqlglot/generators/redshift.py
+@@ -39,7 +39,7 @@ class RedshiftGenerator(PostgresGenerator):
+     SUPPORTS_DECODE_CASE = True
+     SUPPORTS_BETWEEN_FLAGS = False
+     LIMIT_FETCH = "LIMIT"
+-    STAR_EXCEPT = "EXCLUDE"
++    STAR_EXCEPT = 'EXCLUDEx'
+     STAR_EXCLUDE_REQUIRES_DERIVED_TABLE = False
+ 
+     # Redshift doesn't have `WITH` as part of their with_properties so we remove it

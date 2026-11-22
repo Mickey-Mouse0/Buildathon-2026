@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/hive.py b/sqlglot/generators/hive.py
+index 20a071db..8379ce22 100644
+--- a/sqlglot/generators/hive.py
++++ b/sqlglot/generators/hive.py
+@@ -236,7 +236,7 @@ class HiveGenerator(generator.Generator):
+     TABLESAMPLE_WITH_METHOD = False
+     JOIN_HINTS = False
+     TABLE_HINTS = False
+-    QUERY_HINTS = False
++    QUERY_HINTS = True
+     INDEX_ON = "ON TABLE"
+     EXTRACT_ALLOWS_QUOTES = False
+     NVL2_SUPPORTED = False

@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..4bb29e64 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -492,7 +492,7 @@ class Generator:
+     PIVOT_ALIAS_WITH_AS = True
+ 
+     # What delimiter to use for separating JSON key/value pairs
+-    JSON_KEY_VALUE_PAIR_SEP = ":"
++    JSON_KEY_VALUE_PAIR_SEP = ':x'
+ 
+     # INSERT OVERWRITE TABLE x override
+     INSERT_OVERWRITE = " OVERWRITE TABLE"

@@ -1,0 +1,13 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index fed01b2c..59455d6a 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -714,7 +714,7 @@ class Dialect(metaclass=_Dialect):
+     This expands to all fields within the struct.
+     """
+ 
+-    STAR_ILIKE_BACKSLASH_ESCAPE = False
++    STAR_ILIKE_BACKSLASH_ESCAPE = True
+     """
+     Whether a backslash in a `SELECT * ILIKE '<pattern>'` filter escapes the following character,
+     so that e.g. `\\_` matches a literal underscore (Snowflake). When False, backslashes in the

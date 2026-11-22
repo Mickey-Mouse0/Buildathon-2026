@@ -1,0 +1,13 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index fed01b2c..0c4522e7 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -637,7 +637,7 @@ class Dialect(metaclass=_Dialect):
+         SELECT y.foo AS bar, y.foo * 2 AS baz FROM y  -- VALID
+     """
+ 
+-    SUPPORTS_ALIAS_REFS_IN_JOIN_CONDITIONS = False
++    SUPPORTS_ALIAS_REFS_IN_JOIN_CONDITIONS = True
+     """
+     Whether alias references are allowed in JOIN ... ON clauses.
+ 

@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..eb53f9c6 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -498,7 +498,7 @@ class Generator:
+     INSERT_OVERWRITE = " OVERWRITE TABLE"
+ 
+     # Whether the SELECT .. INTO syntax is used instead of CTAS
+-    SUPPORTS_SELECT_INTO = False
++    SUPPORTS_SELECT_INTO = True
+ 
+     # Whether UNLOGGED tables can be created
+     SUPPORTS_UNLOGGED_TABLES = False

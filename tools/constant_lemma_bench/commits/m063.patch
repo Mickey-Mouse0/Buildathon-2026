@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/druid.py b/sqlglot/generators/druid.py
+index 3965c1d5..01a33b34 100644
+--- a/sqlglot/generators/druid.py
++++ b/sqlglot/generators/druid.py
+@@ -9,7 +9,7 @@ class DruidGenerator(generator.Generator):
+     SELECT_KINDS = ()
+     TRY_SUPPORTED = False
+     SUPPORTS_UESCAPE = False
+-    SUPPORTS_DECODE_CASE = False
++    SUPPORTS_DECODE_CASE = True
+ 
+     AFTER_HAVING_MODIFIER_TRANSFORMS = generator.AFTER_HAVING_MODIFIER_TRANSFORMS
+ 

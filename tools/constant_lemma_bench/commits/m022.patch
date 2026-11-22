@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..f6b4108a 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -495,7 +495,7 @@ class Generator:
+     JSON_KEY_VALUE_PAIR_SEP = ":"
+ 
+     # INSERT OVERWRITE TABLE x override
+-    INSERT_OVERWRITE = " OVERWRITE TABLE"
++    INSERT_OVERWRITE = ' OVERWRITE TABLEx'
+ 
+     # Whether the SELECT .. INTO syntax is used instead of CTAS
+     SUPPORTS_SELECT_INTO = False

@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/oracle.py b/sqlglot/generators/oracle.py
+index cc2c2a56..74106942 100644
+--- a/sqlglot/generators/oracle.py
++++ b/sqlglot/generators/oracle.py
+@@ -34,7 +34,7 @@ class OracleGenerator(generator.Generator):
+     JOIN_HINTS = False
+     TABLE_HINTS = False
+     DATA_TYPE_SPECIFIERS_ALLOWED = True
+-    ALTER_TABLE_INCLUDE_COLUMN_KEYWORD = False
++    ALTER_TABLE_INCLUDE_COLUMN_KEYWORD = True
+     LIMIT_FETCH = "FETCH"
+     TABLESAMPLE_KEYWORDS = "SAMPLE"
+     LAST_DAY_SUPPORTS_DATE_PART = False

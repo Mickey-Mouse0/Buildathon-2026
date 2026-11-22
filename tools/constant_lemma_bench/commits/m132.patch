@@ -1,0 +1,13 @@
+diff --git a/sqlglot/parsers/duckdb.py b/sqlglot/parsers/duckdb.py
+index 88a17c4c..41eb56a5 100644
+--- a/sqlglot/parsers/duckdb.py
++++ b/sqlglot/parsers/duckdb.py
+@@ -124,7 +124,7 @@ class DuckDBParser(parser.Parser):
+ 
+     IS_PREDICATE_PRECEDENCE = IsPredicatePrecedence.LOW
+ 
+-    MAP_KEYS_ARE_ARBITRARY_EXPRESSIONS = True
++    MAP_KEYS_ARE_ARBITRARY_EXPRESSIONS = False
+     PIVOT_COLUMN_NAMING = "agg_name_if_aliased_or_multiple"
+ 
+     SUPPORTS_DIRECTED_JOIN = False

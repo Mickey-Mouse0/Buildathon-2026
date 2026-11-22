@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/bigquery.py b/sqlglot/generators/bigquery.py
+index bb1a4c1f..678e8b28 100644
+--- a/sqlglot/generators/bigquery.py
++++ b/sqlglot/generators/bigquery.py
+@@ -364,7 +364,7 @@ class BigQueryGenerator(generator.Generator):
+     NAMED_PLACEHOLDER_TOKEN = "@"
+     HEX_FUNC = "TO_HEX"
+     WITH_PROPERTIES_PREFIX = "OPTIONS"
+-    SUPPORTS_EXPLODING_PROJECTIONS = False
++    SUPPORTS_EXPLODING_PROJECTIONS = True
+     EXCEPT_INTERSECT_SUPPORT_ALL_CLAUSE = False
+     SUPPORTS_UNIX_SECONDS = True
+     DECLARE_DEFAULT_ASSIGNMENT = "DEFAULT"

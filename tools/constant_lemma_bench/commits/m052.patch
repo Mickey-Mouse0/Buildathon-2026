@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..7303d59f 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -635,7 +635,7 @@ class Generator:
+     VARIANCE_RETURNS_ZERO_ON_SINGLE_VALUE = False
+ 
+     # The syntax to use when altering the type of a column
+-    ALTER_SET_TYPE = "SET DATA TYPE"
++    ALTER_SET_TYPE = 'SET DATA TYPEx'
+ 
+     # Whether exp.ArraySize should generate the dimension arg too (valid for Postgres & DuckDB)
+     # None -> Doesn't support it at all

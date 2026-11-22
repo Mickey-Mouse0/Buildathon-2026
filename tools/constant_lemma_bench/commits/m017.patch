@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..431d3d1a 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -529,7 +529,7 @@ class Generator:
+     JSON_TYPE_REQUIRED_FOR_EXTRACTION = False
+ 
+     # Whether bracketed keys like ["foo"] are supported in JSON paths
+-    JSON_PATH_BRACKETED_KEY_SUPPORTED = True
++    JSON_PATH_BRACKETED_KEY_SUPPORTED = False
+ 
+     # Whether to escape keys using single quotes in JSON paths
+     JSON_PATH_SINGLE_QUOTE_ESCAPE = False

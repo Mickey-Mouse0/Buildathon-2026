@@ -1,0 +1,13 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index fed01b2c..20aa8c3e 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -123,7 +123,7 @@ class Dialects(str, Enum):
+     RISINGWAVE = "risingwave"
+     SNOWFLAKE = "snowflake"
+     SOLR = "solr"
+-    SPARK = "spark"
++    SPARK = 'sparkx'
+     SPARK2 = "spark2"
+     SQLITE = "sqlite"
+     STARROCKS = "starrocks"

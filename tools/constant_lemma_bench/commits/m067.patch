@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/drill.py b/sqlglot/generators/drill.py
+index e39f4085..7f3c9cea 100644
+--- a/sqlglot/generators/drill.py
++++ b/sqlglot/generators/drill.py
+@@ -25,7 +25,7 @@ def _str_to_date(self: DrillGenerator, expression: exp.StrToDate) -> str:
+ 
+ 
+ class DrillGenerator(generator.Generator):
+-    BYTE_STRING_FUNCTION = "UNHEX"
++    BYTE_STRING_FUNCTION = 'UNHEXx'
+     SELECT_KINDS = ()
+     TRY_SUPPORTED = False
+     SUPPORTS_UESCAPE = False

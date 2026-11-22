@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+index 573d3c15..3962c060 100644
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -462,7 +462,7 @@ class Generator:
+     HISTORICAL_DATA_POST_ALIAS = False
+ 
+     # Whether COLLATE is a function instead of a binary operator
+-    COLLATE_IS_FUNC = False
++    COLLATE_IS_FUNC = True
+ 
+     # Whether data types support additional specifiers like e.g. CHAR or BYTE (oracle)
+     DATA_TYPE_SPECIFIERS_ALLOWED = False

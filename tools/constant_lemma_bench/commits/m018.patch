@@ -1,0 +1,13 @@
+diff --git a/sqlglot/generators/bigquery.py b/sqlglot/generators/bigquery.py
+index bb1a4c1f..e06eead1 100644
+--- a/sqlglot/generators/bigquery.py
++++ b/sqlglot/generators/bigquery.py
+@@ -355,7 +355,7 @@ class BigQueryGenerator(generator.Generator):
+     SUPPORTS_TABLE_ALIAS_COLUMNS = False
+     SUPPORTS_NAMED_CTE_COLUMNS = False
+     UNPIVOT_ALIASES_ARE_IDENTIFIERS = False
+-    JSON_KEY_VALUE_PAIR_SEP = ","
++    JSON_KEY_VALUE_PAIR_SEP = ',x'
+     NULL_ORDERING_SUPPORTED: bool | None = False
+     IGNORE_NULLS_IN_FUNC = True
+     JSON_PATH_SINGLE_QUOTE_ESCAPE = True
