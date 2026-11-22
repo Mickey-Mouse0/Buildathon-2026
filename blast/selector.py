@@ -174,13 +174,13 @@ def probe_tpc(cid, chosen, files, ms, by_id):
 
 
 def probe_small(cid, chosen, files, ms, by_id):
-    """PROBE "small": the real selection, except that a commit which edits sqlglot code,
+    """PROBE "small": the real selection, except that a commit which edits only sqlglot code,
     costs under 4.5 s and whose tests the runtime check did not run prints no tests.
     Commits missed = how many of those really break something; the fall in simulated
     time (after taking 300 s per miss off) = what those commits cost us."""
     workers = pack(chosen, ms)
     c = (max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)) if workers else 0
-    code = files is not None and any(p and p.startswith("sqlglot/") and p.endswith(".py") for fc in files for p in (fc.old_path, fc.new_path))
+    code = bool(files) and all(p is None or (p.startswith("sqlglot/") and p.endswith(".py")) for fc in files for p in (fc.old_path, fc.new_path))
     ran = any(ln.startswith("runtime check: ran") for ln in _probe_log.get(cid, []))
     if workers and code and c < 4500 and not ran:
         print(cid, "PROBE small: dropped a selection of", c, "ms", file=sys.stderr)
