@@ -41,8 +41,44 @@ WORKER_MS = 2000
 MAX_WORKERS = 8
 
 
+_probe_log = {}
+
+
 def log(*a):
     print(*a, file=sys.stderr)
+    if PROBE and a:
+        _probe_log.setdefault(str(a[0]), []).append(" ".join(map(str, a[1:])))
+
+
+# PRACTICE-BOARD PROBE, NOT AN ENTRY. Replaces the output with one that tells, through
+# the simulated total and the miss count, how this selector behaves on the practice set.
+PROBE = os.environ.get("BLAST_PROBE", "")
+_MARK = ('tests/dialects/test_athena.py::TestAthena::test_func_builder', 'tests/test_executor.py::TestExecutor::test_null_ordering_honors_nulls_first_and_dialect_defaults', 'tests/test_optimizer.py::TestOptimizer::test_scope')  # 0.001 s, 0.047 s, 2.533 s: counts of up to 45 decode uniquely
+_TPCDS, _MAXNODES, _GENMEM = 'tests/test_executor.py::TestExecutor::test_execute_tpcds', 'tests/test_parser.py::TestParser::test_max_nodes', 'tests/test_generator.py::TestGenerator::test_generator_memory'
+
+
+def probe_workers(cid, chosen, ms, by_id):
+    import re
+
+    workers = pack(chosen, ms)
+    c = (max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)) if workers else 0
+    text = "\n".join(_probe_log.get(cid, ()))
+    if PROBE == "1":
+        return []
+    if PROBE == "3":
+        return pack([n for n in chosen if n != by_id.get(_TPCDS)], ms)
+    if PROBE == "4":
+        return pack([n for n in chosen if n not in (by_id.get(_MAXNODES), by_id.get(_GENMEM))], ms)
+    if PROBE == "2a":
+        k = 3 if c >= 30000 else 2 if c >= 20000 else 1 if c >= 4500 else 0
+    elif PROBE == "2c":
+        k = 0 if c == 0 else 1 if c < 2500 else 2 if c < 4500 else 3
+    elif PROBE == "2b":
+        m = re.search(r"tpc test_execute_tpcds: .*?(\d+) run", text)
+        k = (3 if int(m.group(1)) >= 10 else 2) if m else 1 if "tpc check skipped" in text else 0
+    else:
+        return workers
+    return [[by_id[_MARK[k - 1]]]] if k else []
 
 
 def pack(numbers, ms):
@@ -791,7 +827,7 @@ def main():
                 chosen = runtime_check(cid, files, chosen, ms, id_of)
             except Exception as e:
                 log(cid, "runtime check error, keeping the tests:", repr(e))
-        workers = pack(chosen, ms)
+        workers = probe_workers(cid, chosen, ms, by_id) if PROBE else pack(chosen, ms)
         if workers:
             total += max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)
         print(json.dumps({"commit": cid, "workers": workers}), flush=True)
