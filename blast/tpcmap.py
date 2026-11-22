@@ -538,6 +538,8 @@ def check(src, expected_path):
     slow_x = job.get("slow_x", 0)
     relaxed = os.environ.get("BLAST_TPC_RELAXED", "1") == "1"
     early = int(os.environ.get("BLAST_TPC_EARLY", "6"))
+    # not when the patch edits execute() itself: the shortcut below copies its last steps
+    reuse = os.environ.get("BLAST_TPC_REUSE", "1") == "1" and "sqlglot/executor/__init__.py" not in job["overlay"]
     if slow_x:
         import signal
 
@@ -568,6 +570,11 @@ def check(src, expected_path):
             tables = dict(setup_tables) if fixture == "tpc-ds" else {}
             cpu = job.get("cpu", {}).get(test_id)
 
+            from sqlglot.executor.python import PythonExecutor
+            from sqlglot.planner import Plan
+
+            kept = {}
+
             def one(q, front):
                 """True: same as the pinned commit. False: differs. None (front only):
                 the tree differs at Plan(), so the query must run in full to tell."""
@@ -581,10 +588,30 @@ def check(src, expected_path):
                     if need:
                         tables.update(pickle.loads(pickle.dumps(load_tables(src, fixture, schema, need, cache=True))))
 
+                if not front and q in kept:
+                    # The front pass already took this query to Plan() on the patched
+                    # code and its DuckDB SQL matched. execute() does nothing between
+                    # there and its return but plan and run, so carry on from that tree
+                    # instead of parsing and optimizing the query a second time.
+                    tree, tabs = kept.pop(q)
+                    if slow_x:
+                        signal.setitimer(signal.ITIMER_PROF, slow_x * exp_["cpu"] + 1.0)
+                    try:
+                        table = pickle.loads(pickle.dumps(PythonExecutor(tables=tabs).execute(Plan(tree))))
+                    finally:
+                        if slow_x:
+                            signal.setitimer(signal.ITIMER_PROF, 0)
+                    st["ran"] += 1
+                    st["reused"] = st.get("reused", 0) + 1
+                    return (tuple(table.columns), [tuple(r) for r in table.rows]) == exp_["result"]
+
                 def at_plan(tree, tabs, exp_=exp_):
+                    if reuse:
+                        kept[q] = (tree, tabs)
                     if exp_.get("tree") is None or tabs_shape(tabs, _hook["needed"]) != exp_["tabs"]:
                         raise _OtherTree
                     if tree_digest(tree) == exp_["tree"]:
+                        kept.pop(q, None)
                         raise _SameTree
                     # The tree may still differ only in slots this query never reads after
                     # planning. Copying carries those slots along, so the copies made
@@ -593,6 +620,7 @@ def check(src, expected_path):
                     if want and relaxed_digest(tree, exp_["blind"]) == want:
                         tree.copy()
                         st["relaxed"] = st.get("relaxed", 0) + 1
+                        kept.pop(q, None)
                         raise _SameTree
                     raise _OtherTree
 

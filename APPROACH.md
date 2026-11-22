@@ -301,3 +301,11 @@ Three changes, each from a review of one stage, and one audit.
 - **Audit of every drop that is not a real run.** The planted labels turned out to miss tests that fail only through `subTest`. So for each of the 58 planted commits where a stage after coverage drops tests, every dropped test was run on the patched tree with the real process pools, counting subtest failures: 2,077 runs, all pass. (One patch, to `sqlglot/__main__.py`, drops the whole suite; run as one process, 22 `TestOptimizer` tests failed there, and the same 22 pass when run by themselves on that tree.)
 
 Looked at and left out: `test_max_nodes` costs 26 s of CPU to run for real, so it cannot be checked by running it; a scaled-down input is not equivalent (integer identity, positions and the node limit all depend on size). A finer per-query stage map for the TPC check (skip the DuckDB transpile, the debug print or the parse when the patch never reaches them) measured 22% less per pass and is not built.
+
+## TPC check: full runs continue from the front pass's tree
+
+A front query whose tree differed used to be parsed and optimized a second time for its full run. The check now keeps the tree and tables the front pass reached `Plan()` with and finishes from there (`Plan`, `PythonExecutor.execute`, the pickle round trip), which is all `execute()` does after that point. Not used when the patch edits `sqlglot/executor/__init__.py`; `BLAST_TPC_REUSE=0` turns it off.
+
+Measured in the image on two planted patches with the relaxed digest off so that the trees differ: same verdicts with and without (one passes all 57 queries, one fails), CPU 12.84 s to 10.92 s and 5.25 s to 4.80 s. Samples: same output as before, 94.426 s, 0 misses. `make sample` under amd64 and the larger planted run were not repeated for this change.
+
+On the practice board, with the check switched off entirely (`BLAST_TPC_GATE=0`) simulated time rises by 41.5 s and CPU falls by 18.7 s; with the runtime check off, simulated rises by 7.4 s and CPU falls by 5.0 s. Both stay on.
