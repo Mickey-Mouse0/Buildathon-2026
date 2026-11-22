@@ -35,6 +35,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # would break stays selected; pytest's own frames are far fewer than the margin.
 RECURSION_LIMIT = 900
 SLICED = ("tests.test_optimizer",)
+# predicted CPU of a test run here, per second it took under pytest (median ~0.7, p90 ~1.1)
+PRED_X = float(os.environ.get("BLAST_RUNCHECK_PRED_X", "1.4"))
 POOLED = ("tests.test_optimizer", "tests.test_executor")
 
 
@@ -466,7 +468,7 @@ def serve(src, deps, data_dir):
         try:
             req = _recv(rfd)
         except EOFError:
-            return
+            os._exit(0)  # skip interpreter teardown
         try:
             resp = handle(req, src, idx, called, keys, slices, setup)
         except Exception as e:
@@ -496,7 +498,7 @@ def handle(req, src, idx, called, keys, slices, setup):
             filters[tid] = flt
             p = 1.3 * (cpu.get(None, 0.0) + sum(cpu.get(e, 0.0) for e in flt)) + 0.01
         else:
-            p = 1.4 * sec + 0.01
+            p = PRED_X * sec + 0.01
         pred += p
         caps[tid] = max(1.0, 4 * p)
     # class setups run outside the per-test caps; the child's overall deadline bounds them
