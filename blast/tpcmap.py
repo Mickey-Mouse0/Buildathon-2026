@@ -80,6 +80,14 @@ class _SameTree(BaseException):
 
 
 SAME = object()
+
+
+class _Slow(BaseException):
+    """A query ran far past its pinned CPU time (check's slow_x)."""
+
+
+def _on_slow(signum, frame):
+    raise _Slow
 _hook = {"at_plan": None, "tabs": None, "needed": None, "on": False}
 
 
@@ -386,6 +394,14 @@ def check(src, expected_path):
     with open(expected_path, "rb") as f:
         expected = pickle.load(f)
     verdict, stats = {}, {}
+    # A query that takes slow_x times its pinned CPU (plus 1 s) is cut off and its test
+    # kept, instead of running on until the selector's overall timeout (0: off).
+    slow_x = job.get("slow_x", 0)
+    if slow_x:
+        import signal
+
+        signal.signal(signal.SIGPROF, _on_slow)
+    slow = False
     try:
         # skipped when the selector found the patch can't change it (setup_lines)
         setup_tables = class_setup(src) if job.get("setup", True) else {}
@@ -396,6 +412,9 @@ def check(src, expected_path):
         sys.stdout.buffer.write(pickle.dumps(verdict))
         return
     for test_id, queries in job["jobs"].items():
+        if slow:  # state may be half-updated after a cut: keep the rest too
+            verdict[test_id] = False
+            continue
         ok = True
         st = stats[test_id] = {"same_tree": 0, "ran": 0}
         try:
@@ -419,11 +438,21 @@ def check(src, expected_path):
                             and tabs_shape(tabs, _hook["needed"]) == exp_["tabs"]:
                         raise _SameTree
 
-                res, duck = run_query(meta, sql, schema, tables, at_plan if front else None)
+                if slow_x:
+                    signal.setitimer(signal.ITIMER_PROF, slow_x * exp_["cpu"] + 1.0)
+                try:
+                    res, duck = run_query(meta, sql, schema, tables, at_plan if front else None)
+                finally:
+                    if slow_x:
+                        signal.setitimer(signal.ITIMER_PROF, 0)
                 st["same_tree" if res is SAME else "ran"] += 1
                 if (res is not SAME and res != exp_["result"]) or duck != exp_["duckdb"]:
                     ok = False
                     break
+        except _Slow:
+            print("tpccheck:", test_id, "query far slower than at the pinned commit", file=sys.stderr)
+            st["slow"] = True
+            slow, ok = True, False
         except Exception as e:
             print("tpccheck:", test_id, repr(e), file=sys.stderr)
             ok = False

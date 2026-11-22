@@ -335,6 +335,8 @@ def tpc_query_edit(cid, files, chosen, ms, by_id):
     return rest if verdict["ok"] is True else chosen
 
 
+# the TPC check cuts off a query that takes this many times its pinned CPU (+1 s); 0: off
+TPC_SLOW_X = float(os.environ.get("BLAST_TPC_SLOW_X", "3"))
 TPC_SETUP_LINES = os.environ.get("BLAST_TPC_SETUP_LINES", str(HERE / "tpc_setup_lines.json"))
 # BLAST_TPC_SETUP_ALWAYS=1: rebuild every table in each check, as 57dd629 did
 TPC_SETUP_ALWAYS = os.environ.get("BLAST_TPC_SETUP_ALWAYS") == "1"
@@ -497,7 +499,7 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
                 if not setup:
                     log(cid, "tpc check: class setup unchanged by the patch, not rebuilt")
                 r = subprocess.run([sys.executable, str(HERE / "tpcmap.py"), "check", SRC, TPC_EXPECTED],
-                                   input=pickle.dumps({"overlay": overlay, "jobs": jobs, "setup": setup}),
+                                   input=pickle.dumps({"overlay": overlay, "jobs": jobs, "setup": setup, "slow_x": TPC_SLOW_X}),
                                    capture_output=True, env=env, timeout=min(_time_left(), max(2 * est + 3, 0.8 * gain / 1000)))
                 verdict = pickle.loads(r.stdout) if r.returncode == 0 else {}
                 stats = verdict.get("_stats", {})
@@ -505,7 +507,8 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
                     ok = verdict.get(test_id, False)
                     st = stats.get(test_id, {})
                     log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: {len(qs['front']) + len(qs['full'])} queries reached "
-                             f"({len(qs['front'])} before planning only; {st.get('same_tree', 0)} same tree, {st.get('ran', 0)} run), "
+                             f"({len(qs['front'])} before planning only; {st.get('same_tree', 0)} same tree, {st.get('ran', 0)} run"
+                             f"{', cut off as slow' if st.get('slow') else ''}), "
                              f"{'same results, dropped' if ok else 'kept'}")
                     if ok:
                         drop.add(by_id[test_id])
