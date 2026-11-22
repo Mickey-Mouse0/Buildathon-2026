@@ -431,6 +431,103 @@ def build_expected(src, out):
         pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+CMP_PARTNER = {"Lt": "LtE", "LtE": "Lt", "Gt": "GtE", "GtE": "Gt"}
+CMP_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+
+
+def build_cmp(src, out):
+    """Image build: for every `a < b`, `a <= b`, `a > b`, `a >= b` in sqlglot, the TPC-DS
+    queries in which the other operator of its pair (< with <=, > with >=) would ever
+    have given a different answer or raised. sqlglot is imported with each such
+    comparison rewritten into a call that evaluates both and passes the real one on.
+    Query -1 stands for import and table setup. A patch that only swaps one comparison
+    for its partner changes nothing in a query that is not listed for it: every
+    evaluation gives the value it gave, so the run is the pinned run."""
+    import builtins
+    import importlib
+    import operator
+    import pkgutil
+
+    sys.setrecursionlimit(20000)
+    sys.path.insert(0, HERE)
+    from importstate import _Overlay
+
+    ops = {"Lt": operator.lt, "LtE": operator.le, "Gt": operator.gt, "GtE": operator.ge}
+    sites, differ, cur = [], [], [-1]
+
+    class Rewrite(ast.NodeTransformer):
+        path = None
+
+        def visit_Compare(self, node):
+            self.generic_visit(node)
+            name = type(node.ops[0]).__name__
+            if len(node.ops) != 1 or name not in ops:
+                return node
+            sites.append((self.path, node.lineno, node.col_offset, name))
+            differ.append(set())
+            call = ast.Call(ast.Name("blast_cmp_", ast.Load()), [ast.Constant(len(sites) - 1), node.left, node.comparators[0]], [])
+            return ast.copy_location(call, node)
+
+    def cmp(i, a, b):
+        name = sites[i][3]
+        try:
+            real = ops[name](a, b)
+        except BaseException:
+            differ[i].add(cur[0])
+            raise
+        try:
+            other = ops[CMP_PARTNER[name]](a, b)
+        except BaseException:
+            differ[i].add(cur[0])
+            return real
+        if not (type(real) is bool and real is other):
+            differ[i].add(cur[0])
+        return real
+
+    builtins.blast_cmp_ = cmp
+    overlay = {}
+    for root, _, names in os.walk(os.path.join(src, "sqlglot")):
+        for name in names:
+            if name.endswith(".py"):
+                full = os.path.join(root, name)
+                with open(full, encoding="utf-8") as f:
+                    tree = ast.parse(f.read())
+                r = Rewrite()
+                r.path = os.path.relpath(full, src)
+                overlay[full] = ast.unparse(ast.fix_missing_locations(r.visit(tree)))
+    sys.meta_path.insert(0, _Overlay(overlay))
+    import sqlglot
+
+    for m in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
+        if not m.name.endswith("__main__"):
+            try:
+                importlib.import_module(m.name)
+            except BaseException:
+                pass
+    fixture, sqls, schema = suite(src, CMP_TEST)
+    tables = pickle.loads(pickle.dumps(load_tables(src, fixture, schema)))
+    load_tables(src, "tpc-h", __import__("tests.helpers", fromlist=["x"]).TPCH_SCHEMA)
+    failed = 0
+    for q, (meta, sql, _) in enumerate(sqls):
+        cur[0] = q
+        try:
+            run_query(meta, sql, schema, tables)
+        except Exception as e:
+            failed += 1
+            if failed == 1:
+                print("tpc cmp: first failure", q, repr(e)[:300], file=sys.stderr)
+    cur[0] = -1
+    table = {}
+    for (path, line, col, name), qs in zip(sites, differ):
+        table.setdefault(path, {})[(line, col)] = (name, frozenset(qs))
+    with open(out, "wb") as f:
+        pickle.dump({CMP_TEST: table, "queries": len(sqls)}, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"tpc cmp: {len(sites)} comparisons in {len(table)} files, {sum(1 for d in differ if d)} where the partner ever differs, "
+          f"{failed} queries failed", file=sys.stderr)
+    if failed:
+        sys.exit(1)
+
+
 def class_setup(src, cache=False):
     """What test_execute_tpcds's module and class setup do with sqlglot, on the patched
     code: the module's sqlglot imports, every table of both schemas built the way
@@ -724,4 +821,4 @@ if __name__ == "__main__":
     sys.path.insert(0, src)
     os.chdir(src)
     {"map": build_map, "expected": build_expected, "check": check, "setup-lines": setup_lines,
-     "rows": save_rows}[cmd](src, out)
+     "rows": save_rows, "cmp": build_cmp}[cmd](src, out)

@@ -350,11 +350,79 @@ def tpc_query_edit(cid, files, chosen, ms, by_id):
 # the TPC check cuts off a query that takes this many times its pinned CPU (+1 s); 0: off
 TPC_SLOW_X = float(os.environ.get("BLAST_TPC_SLOW_X", "3"))
 TPC_SETTING_SITES = os.environ.get("BLAST_TPC_SETTING_SITES", "1") == "1"
+TPC_CMP_RULE = os.environ.get("BLAST_TPC_CMP_RULE", "1") == "1"
 _prover = []
 TPC_SETUP_LINES = os.environ.get("BLAST_TPC_SETUP_LINES", str(HERE / "tpc_setup_lines.json"))
 # BLAST_TPC_SETUP_ALWAYS=1: rebuild every table in each check, as 57dd629 did
 TPC_SETUP_ALWAYS = os.environ.get("BLAST_TPC_SETUP_ALWAYS") == "1"
 _setup_lines = []
+
+
+TPC_CMP = os.environ.get("BLAST_TPC_CMP", str(HERE / "tpc_cmp.pkl"))
+_tpc_cmp = []
+
+
+def comparison_swap(files):
+    """(path, line, column, old operator, new operator) when the whole patch is one
+    comparison in one sqlglot file changed between < and <= or between > and >=."""
+    import ast
+
+    if len(files) != 1:
+        return None
+    fc = files[0]
+    if fc.old_path is None or fc.old_path != fc.new_path or not (fc.path.startswith("sqlglot/") and fc.path.endswith(".py")):
+        return None
+    with open(os.path.join(SRC, fc.old_path), encoding="utf-8") as f:
+        old = f.read()
+    new = fc.apply(old)
+    if new is None:
+        return None
+    try:
+        a, b = ast.parse(old), ast.parse(new)
+    except SyntaxError:
+        return None
+    hit = None
+    for x, y in zip(ast.walk(a), ast.walk(b)):
+        if isinstance(x, ast.cmpop) and isinstance(y, ast.cmpop):
+            continue
+        if type(x) is not type(y):
+            return None
+        if isinstance(x, ast.Compare) and [type(o) for o in x.ops] != [type(o) for o in y.ops]:
+            if hit is not None or len(x.ops) != 1 or len(y.ops) != 1:
+                return None
+            hit = (x, y)
+    if hit is None:
+        return None
+    x, y = hit
+    was, now = type(x.ops[0]).__name__, type(y.ops[0]).__name__
+    if {was, now} not in ({"Lt", "LtE"}, {"Gt", "GtE"}):
+        return None
+    y.ops = x.ops
+    if ast.dump(a) != ast.dump(b):
+        return None
+    return fc.old_path, x.lineno, x.col_offset, was, now
+
+
+def comparison_queries(files, test_id):
+    """The queries of test_id in which this patch can change anything, when the patch
+    is a lone comparison swap recorded in tpc_cmp.pkl (tpcmap.build_cmp); else None."""
+    if not _tpc_cmp:
+        try:
+            with open(TPC_CMP, "rb") as f:
+                _tpc_cmp.append(pickle.load(f))
+        except (OSError, pickle.PickleError, EOFError):
+            _tpc_cmp.append({})
+    table = _tpc_cmp[0].get(test_id)
+    if not table:
+        return None
+    swap = comparison_swap(files)
+    if swap is None:
+        return None
+    path, line, col, was, now = swap
+    entry = table.get(path, {}).get((line, col))
+    if entry is None or entry[0] != was or -1 in entry[1]:
+        return None
+    return set(entry[1])
 
 
 def tpc_setup_needed(files):
@@ -399,6 +467,7 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
     # doesn't know could matter to anyone. A test module matters only if
     # test_executor.py is it or imports it (conftest.py and __init__.py: always).
     m = analyzer.m
+    all_files = list(files)
     others = sorted({p for fc in files for p in (fc.old_path, fc.new_path)
                      if p is not None and not p.startswith("sqlglot/")})
 
@@ -413,6 +482,7 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
     if any(blocks(p) for p in others):
         return chosen
     others = [p for p in others if not p.endswith(".py")]
+    sqlglot_files = all_files if not others else []
     files = [fc for fc in files if fc.path.startswith("sqlglot/")]
     if not files:
         return chosen
@@ -460,6 +530,13 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
             return a.analyze(text, files)
 
         q, notes = reached(qm)
+        # A lone < / <= or > / >= swap: at build, each query was run with both operators
+        # evaluated at every comparison. Where they never disagreed, the patched run
+        # computes what the pinned run computed.
+        swapped = comparison_queries(sqlglot_files, test_id) if TPC_CMP_RULE and not others else None
+        if swapped is not None:
+            q = sorted(swapped if q is None else set(q) & swapped)
+            log(cid, f"tpc check: comparison swap, the two operators disagree in {len(swapped)} queries")
         if q is None:
             log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: all queries ({'; '.join(notes[-2:])})")
             continue
@@ -472,7 +549,7 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
         late = None
         if "exec" in qm and all(f is not None for f in front_cpu[test_id]) and not NO_STAGED_TPC:
             late, _ = reached(qm["exec"])
-        full = set(q) if late is None else set(late)
+        full = set(q) if late is None else set(late) & set(q)
         # One class setting changed and nothing else differs after import. The new value
         # can only show where a read of it runs, and the constant lemma says which reads
         # it cannot prove unchanged for this test. A query that runs none of those after

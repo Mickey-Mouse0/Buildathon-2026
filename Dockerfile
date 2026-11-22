@@ -30,6 +30,8 @@ RUN sh /app/tools/build_importstate.sh /opt/sqlglot /app/blast/importstate.pkl \
          || PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tokreplay.py base /opt/sqlglot \
             /app/blast/tokreplay.pkl.xz /app/blast/tokreplay_base.pkl; } \
     && PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcmap.py expected /opt/sqlglot /app/blast/tpc_expected.pkl \
+    && (PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcmap.py cmp /opt/sqlglot /app/blast/tpc_cmp.pkl \
+        || (rm -f /app/blast/tpc_cmp.pkl; echo "tpc cmp failed: comparison swaps go to the normal check")) \
     && (PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcmap.py rows /opt/sqlglot /app/blast/tpc_rows.pkl \
         || (rm -f /app/blast/tpc_rows.pkl; echo "tpc rows failed: the check parses the fixture tables itself")) \
     && (PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcmap.py setup-lines /opt/sqlglot /app/blast/tpc_setup_lines.json \

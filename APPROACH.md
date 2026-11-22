@@ -319,3 +319,11 @@ When the patch is a single constant swap of one setting and nothing else differs
 Checked on one patch per class-level constant in sqlglot (1,022): it changes the split on 4 (`ALIAS_POST_TABLESAMPLE`, `SUPPORTS_LIMIT_ALL`, `ALIAS_POST_VERSION`, `SET_OP_MODIFIERS`). All four are then dropped after the front pass with every tree unchanged, and for each a full run of all reached queries with the rule off gives the pinned rows. Samples: same output, 94.426 s, 0 misses. Not rerun: `make sample` under amd64 and the planted commits.
 
 Measured on the way: of 254 one-line code edits on lines all queries reach after planning that the free stages cannot settle, 11 leave every result unchanged, with no common shape.
+
+## TPC check: a lone `<` / `<=` or `>` / `>=` swap
+
+A practice probe pointed at an edit on a lambda line in `sqlglot/executor/` for which the check ran most queries in full and found nothing changed. `"GTE": null_if_any(lambda this, e: this >= e)` with `>=` turned into `>` is such an edit: it only matters when the two sides are equal. The prover records values per expression but gives up past a number of distinct values, and a row-by-row comparison sees thousands.
+
+`tpcmap.py cmp` (image build, `tpc_cmp.pkl`) imports sqlglot with every single `<`, `<=`, `>`, `>=` comparison rewritten into a call that evaluates both operators of the pair and passes the real result on, then runs every TPC-DS query the way the check does. For each comparison it keeps the queries in which the partner operator ever gave a different answer or raised (query -1: during import or table setup). When a patch is exactly one such comparison changed to its partner (`comparison_swap` in `blast/selector.py`: the two syntax trees are equal once that operator is put back), a query not listed computes on the patched code what it computed at the pinned commit, so only the listed queries are checked; with none listed the test is dropped. `BLAST_TPC_CMP_RULE=0` turns it off.
+
+277 comparisons in 54 files; for 232 the partner never differs in any query. Checked on six executor patches against full runs of every reached query with the rule off: the same verdict on all six (two dropped, four kept), CPU for the six 24.8 s to 7.2 s. Samples: same output, 94.426 s, 0 misses; `make sample` 101.357 s, 0 misses.
