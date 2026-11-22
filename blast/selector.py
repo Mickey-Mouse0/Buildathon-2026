@@ -270,6 +270,9 @@ def tokenizer_replay(tok, maps, files, chosen, ms, notes):
 
 TPC_MAP = os.environ.get("BLAST_TPC_MAP", str(HERE / "tpc_map.pkl.gz"))
 TPC_EXPECTED = os.environ.get("BLAST_TPC_EXPECTED", str(HERE / "tpc_expected.pkl"))
+# Per-query CPU estimates, pinned in the repo (tools/record_tpc_cpu.py) so every build's
+# gate decides the same way. Measured at build they swung around the gate's cutoff.
+TPC_CPU = os.environ.get("BLAST_TPC_CPU", str(HERE / "tpc_cpu.json"))
 # Off by default: on the samples and the practice set it only added CPU (checks that
 # start and then keep the test); it paid off on planted commits only.
 NO_CONSTANT_RULE = os.environ.get("BLAST_NO_CONSTANT_RULE") == "1"
@@ -353,6 +356,13 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
             exp = pickle.load(f)
         cpu = {t: [r["cpu"] for r in rows] for t, rows in exp.items()}
         front_cpu = {t: [r.get("front") for r in rows] for t, rows in exp.items()}
+        if os.path.exists(TPC_CPU):
+            with open(TPC_CPU) as f:
+                pinned = json.load(f)
+            for t in exp:
+                p = pinned.get(t)
+                if p is not None and len(p["cpu"]) == len(cpu[t]) == len(p["front"]):
+                    cpu[t], front_cpu[t] = p["cpu"], p["front"]
         _tpc.append((qmaps, cpu, front_cpu))
     qmaps, cpu, front_cpu = _tpc[0]
     drop, jobs, est = set(), {}, 0.0

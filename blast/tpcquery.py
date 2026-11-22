@@ -5,6 +5,11 @@ way test_execute_tpcds does, and say whether that test still passes.
 
 Pickles {"ok": bool, "why": str} to stdout.
 
+    python blast/tpcquery.py known <sqlglot dir> <out json>
+
+Run at image build: lists the expression types the pinned file's executed queries use
+(see order_is_fixed), so the check doesn't parse all 99 queries again on every run.
+
 The test loads (meta, query, expected) triples from the file and, for each one, sends
 parse_one(query) to a pool worker (mp_execute) and compares the result with DuckDB
 running the same query (subtestHelper). Each triple is handled on its own, so a
@@ -27,6 +32,7 @@ import sys
 import tempfile
 
 FILE = "optimizer/tpc-ds/tpc-ds.sql"
+KNOWN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tpc_known.json")
 
 # Expressions whose value is not fixed by the data, or depends on row order.
 UNFIXED = {
@@ -63,6 +69,33 @@ def _tied(a, b):
     return False
 
 
+def _qual(cls):
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def known_types(sqls):
+    """The expression types (by qualified name) of the pinned file's executed queries."""
+    from sqlglot import parse_one
+
+    known = set()
+    for meta, sql, _ in sqls:
+        if meta.get("execute"):
+            known.update(_qual(type(n)) for n in parse_one(sql).walk())
+    return known
+
+
+def build_known(src, out):
+    import json
+
+    sys.path.insert(0, src)
+    os.chdir(src)
+    import tests.helpers as H
+
+    with open(out, "w") as f:
+        json.dump(sorted(known_types(H.load_sql_fixture_pairs(FILE))), f, indent=0)
+        f.write("\n")
+
+
 def order_is_fixed(sql, conn, frame, known_types):
     """None if the query can only ever return these rows in this order, else why not.
 
@@ -81,7 +114,7 @@ def order_is_fixed(sql, conn, frame, known_types):
         name = type(node).__name__
         if name in UNFIXED:
             return f"uses {name}"
-        if type(node) not in known_types:
+        if _qual(type(node)) not in known_types:
             return f"uses {name}, which no pinned query uses"
         if isinstance(node, (exp.Limit, exp.Fetch, exp.Offset)) and node is not limit:
             return "inner LIMIT or OFFSET"
@@ -147,7 +180,13 @@ def main():
         import tests.test_executor as TE
 
         T = TE.TestExecutor
-        T.setUpClass()
+        # setUpClass loads the TPC-H tables too; test_execute_tpcds never reads them
+        tpch = TE.TPCH_SCHEMA
+        TE.TPCH_SCHEMA = {}
+        try:
+            T.setUpClass()
+        finally:
+            TE.TPCH_SCHEMA = tpch
         old = T.tpcds_sqls
         # the patched file, through the test's own loader
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,10 +203,13 @@ def main():
         T.tpcds_sqls = new
         seen = {(tuple(meta.items()), sql) for meta, sql, _ in old}
         changed = [i for i, (meta, sql, _) in enumerate(new) if (tuple(meta.items()), sql) not in seen]
-        known = set()
-        for meta, sql, _ in old:
-            if meta.get("execute"):
-                known.update(type(n) for n in TE.parse_one(sql).walk())
+        try:
+            import json
+
+            with open(KNOWN) as f:
+                known = set(json.load(f))
+        except OSError:
+            known = known_types(old)
         TE.initializer(*pickle.loads(pickle.dumps((TE.TPCDS_SCHEMA, T.tpcds_tables))))
         case = T("test_execute_tpcds")
         for i in changed:
@@ -191,4 +233,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1] == "known":
+        build_known(os.path.abspath(sys.argv[2]), os.path.abspath(sys.argv[3]))
+    else:
+        main()
