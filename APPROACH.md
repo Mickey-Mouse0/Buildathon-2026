@@ -199,3 +199,9 @@ Factory rule: a function that runs at import and has a nested lambda was treated
 Checked in the image (native arm64; the map was re-recorded under amd64 and is identical): samples 101.4 s and the 30-commit set 117.0 s, 0 misses on both. On 200 planted commits, 0 misses against tests run on the patched code; on the 8 commits that keep or check a TPC test, total CPU went from 61.8 s to 40.2 s.
 
 Rebuild the map in the pinned image: `python blast/tpcmap.py map <sqlglot> blast/tpc_map.pkl.gz` (about 40 s).
+
+## Two CPU cuts
+
+- **Constant settings skip the import diff.** When a file's whole change is one class-level line `NAME = constant` whose constant changed, no class body copies the setting, no import-time code mentions it, and the pinned import leaves it as plain data, its value is all that differs after import. The readers are taken from the map directly (`_constant_swap` and `class_attr` in `blast/analyze.py`); `BLAST_NO_CONSTANT_RULE=1` sends these to the import diff again. Same output with and without on the samples, the 30-commit set and 200 planted commits; it fires on 1 sample and 3 planted commits and saves one child process each (about 0.4 s in the image).
+- **The coverage map loads per file.** The image build rewrites `covmap.pkl.gz` uncompressed with one pickle per source file for the per-line table (`analyze.split_map`), and a file's table is unpickled the first time a patch touches it. Loading the map goes from 0.16 s to 0.08 s; output is identical to loading the whole map.
+

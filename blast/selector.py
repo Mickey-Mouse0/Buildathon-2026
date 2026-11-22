@@ -142,11 +142,23 @@ def _overlay(files, notes=None):
     return overlay
 
 
-def patched_import(files, notes, replay=None, budget=None, **replay_opts):
-    """importstate.py's view of the patched sqlglot (and tokenizer replays), or None."""
+def _load_baseline():
     if not _baseline:
         with open(IMPORT_STATE, "rb") as f:
             _baseline.append(pickle.load(f))
+    return _baseline[0]
+
+
+def _plain_setting(ck, name):
+    base = _load_baseline()
+    k = ("a", ck, name)
+    e = base["snap"].get(k)
+    return e is not None and e[1] == "plain" and k not in base.get("unstable", ()) and k not in base.get("alias", {})
+
+
+def patched_import(files, notes, replay=None, budget=None, **replay_opts):
+    """importstate.py's view of the patched sqlglot (and tokenizer replays), or None."""
+    _load_baseline()
     overlay = _overlay(files, notes)
     if overlay is None:
         return None
@@ -260,6 +272,7 @@ TPC_MAP = os.environ.get("BLAST_TPC_MAP", str(HERE / "tpc_map.pkl.gz"))
 TPC_EXPECTED = os.environ.get("BLAST_TPC_EXPECTED", str(HERE / "tpc_expected.pkl"))
 # Off by default: on the samples and the practice set it only added CPU (checks that
 # start and then keep the test); it paid off on planted commits only.
+NO_CONSTANT_RULE = os.environ.get("BLAST_NO_CONSTANT_RULE") == "1"
 NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "0") != "1"
 _tpc = []
 
@@ -447,7 +460,8 @@ def main():
                 keyreads = KeyReads(KEYMAP, {t: i for i, t in enumerate(maps.tests)})
             except Exception as e:
                 log("key map failed to load, using attribute reads:", repr(e))
-        analyzer = Analyzer(maps, import_diff=os.path.exists(IMPORT_STATE), keyreads=keyreads)
+        analyzer = Analyzer(maps, import_diff=os.path.exists(IMPORT_STATE), keyreads=keyreads,
+                            plain_setting=_plain_setting if os.path.exists(IMPORT_STATE) and not NO_CONSTANT_RULE else None)
         if TOKREPLAY_ON and os.path.exists(IMPORT_STATE) and os.path.exists(TOKREPLAY) and os.path.exists(TOKREPLAY_BASE):
             tok = []  # loaded the first time a patch could use it
     except Exception as e:

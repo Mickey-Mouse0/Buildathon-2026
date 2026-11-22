@@ -59,10 +59,42 @@ def tpc_pairs_load(text):
     return pairs
 
 
+class _LazyLines:
+    """line2t with each file's table unpickled the first time it is asked for: a run
+    touches a few dozen files, and the whole table is half of the map's load time."""
+
+    def __init__(self, blobs):
+        self.blobs = blobs
+        self.loaded = {}
+
+    def get(self, path, default=None):
+        hit = self.loaded.get(path)
+        if hit is None:
+            raw = self.blobs.get(path)
+            if raw is None:
+                return default
+            hit = self.loaded[path] = pickle.loads(raw)
+        return hit
+
+
+def split_map(path):
+    """Image build: rewrite the map uncompressed, with line2t kept as one pickle per file."""
+    with gzip.open(path, "rb") as f:
+        d = pickle.load(f)
+    d["line2t"] = {k: pickle.dumps(v, protocol=pickle.HIGHEST_PROTOCOL) for k, v in d["line2t"].items()}
+    with open(path + ".split", "wb") as f:
+        pickle.dump(d, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
 class Maps:
     def __init__(self, path, src):
-        with gzip.open(path, "rb") as f:
-            d = pickle.load(f)
+        if os.path.exists(path + ".split"):
+            with open(path + ".split", "rb") as f:
+                d = pickle.load(f)
+            d["line2t"] = _LazyLines(d["line2t"])
+        else:
+            with gzip.open(path, "rb") as f:
+                d = pickle.load(f)
         self.__dict__.update(d)
         self.src = src
         self.all = frozenset(range(len(self.tests)))
@@ -160,9 +192,12 @@ def targets_of(st):
 
 
 class Analyzer:
-    def __init__(self, maps, import_diff=False, keyreads=None):
+    def __init__(self, maps, import_diff=False, keyreads=None, plain_setting=None):
         self.m = maps
         self.keyreads = keyreads
+        # plain_setting(class key, name): whether the pinned commit's import leaves that
+        # class attribute as plain data (not an enum member, a callable or a module)
+        self.plain_setting = plain_setting
         # With import_diff, changes whose effect is decided while sqlglot is imported
         # are not answered here. They are left in self.deferred for the selector,
         # which compares sqlglot's state after import with and without the patch
@@ -185,9 +220,10 @@ class Analyzer:
         notes.append(f"deferred to import diff: {why}")
 
     # ---- class settings -------------------------------------------------
-    def class_attr(self, ck, names, notes):
+    def class_attr(self, ck, names, notes, constant=False):
         m = self.m
         keys = {f"{ck}.{n}" for n in names}
+        own_keys = set(keys)
         cnames = {ck.split(":")[1].split(".")[-1]}
         seen = set(names)
         work = list(names)
@@ -230,6 +266,17 @@ class Analyzer:
                 self.defer(f"{ck} {','.join(sorted(names))} read at import", u, notes)
             else:
                 out |= u
+        if constant and not import_read and keys == own_keys:
+            # One setting went from one constant to another, nothing copies it in a
+            # class body and no import-time code mentions it, so its value is all that
+            # differs after import. The import diff would find just that and answer
+            # with these readers; importing the patched sqlglot to hear it is wasted.
+            for k in own_keys:
+                name = k.rsplit(".", 1)[1]
+                for sc in m.subclasses.get(ck, ()):
+                    out |= m.attr2t.get(f"{sc}.{name}", set())
+            notes.append(f"constant setting: {len(out)} (no import diff needed)")
+            return out
         if self.import_diff and self.keyreads is not None:
             # The import diff says which settings really changed (a replaced line also
             # marks the setting below it here) and, for dicts, which keys; the key map
@@ -454,7 +501,18 @@ class Analyzer:
             changed |= {l - 1, l}
         modname = path[:-3].replace("/", ".").removesuffix(".__init__")
         out = set()
+        swap = None
+        removed = sorted(fc.removed_lines())
+        if len(removed) == 1:
+            chain = stmt_chain(oldt, removed[0])
+            quals = [s.name for s in chain if isinstance(s, ast.ClassDef)]
+            if quals and self._constant_swap(old, new, newt, chain, removed[0], f"{modname}:{'.'.join(quals)}"):
+                swap = removed[0]
         for l in sorted(changed):
+            if swap is not None and l != swap:
+                # the lines around a one-line replacement are marked too, but here the
+                # old and new statements both start and end on that line
+                continue
             chain = stmt_chain(oldt, l)
             if not chain:
                 continue
@@ -539,10 +597,37 @@ class Analyzer:
                 self.defer(f"import-time statement {path}:{l}", None, notes)
                 continue
             if qual:
-                out |= self.class_attr(f"{modname}:{'.'.join(qual)}", names, notes)
+                out |= self.class_attr(f"{modname}:{'.'.join(qual)}", names, notes, constant=l == swap)
             else:
                 out |= self.module_global(path, names, notes)
         return out
+
+    def _constant_swap(self, old, new, newt, chain, l, ck):
+        """Whether the file's whole change is line l, a class-level `NAME = constant`
+        whose constant changed, on a setting the pinned import leaves as plain data."""
+        if self.plain_setting is None or not all(isinstance(s, ast.ClassDef) for s in chain[:-1]):
+            return False
+        ol, nl = old.splitlines(), new.splitlines()
+        if len(ol) != len(nl) or ol[:l - 1] != nl[:l - 1] or ol[l:] != nl[l:]:
+            return False
+        after = stmt_chain(newt, l)
+        if len(after) != len(chain) or any(type(a) is not type(b) or getattr(a, "name", None) != getattr(b, "name", None)
+                                           for a, b in zip(chain, after)):
+            return False
+
+        def scalar_assign(st):
+            if not (isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name)
+                    and st.lineno == st.end_lineno == l):
+                return None
+            v = st.value
+            if isinstance(v, ast.UnaryOp) and isinstance(v.op, (ast.USub, ast.UAdd)):
+                v = v.operand
+            if not (isinstance(v, ast.Constant) and isinstance(v.value, (bool, int, float, str, type(None)))):
+                return None
+            return st.targets[0].id
+
+        name = scalar_assign(chain[-1])
+        return name is not None and scalar_assign(after[-1]) == name and bool(self.plain_setting(ck, name))
 
     def analyze(self, patch_text, files):
         """Candidate test indexes for one patch, or None for 'all'."""

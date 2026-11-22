@@ -30,6 +30,7 @@ RUN sh /app/tools/build_importstate.sh /opt/sqlglot /app/blast/importstate.pkl \
        /opt/sqlglot /app/blast/prover_data/profiles.shards \
     && python -c "import lzma, shutil; shutil.copyfileobj(lzma.open('/app/blast/prover_data/union.pkl.xz'), open('/app/blast/prover_data/union.pkl', 'wb'))" \
     && rm /app/blast/prover_data/profiles.pkl.xz /app/blast/prover_data/union.pkl.xz \
+    && python -c "import sys; sys.path.insert(0, '/app/blast'); import analyze; analyze.split_map('/app/blast/covmap.pkl.gz')" \
     && chmod -R a+rX /app \
     && python -c "import compileall; compileall.compile_dir('/app/blast', quiet=1)"
 
