@@ -605,7 +605,9 @@ def main():
                 n = by_id.get(hlreplay.TEST_ID)
                 if n in chosen:
                     hnotes = []
-                    if hlreplay.judge(files, SRC, hnotes):
+                    mi = maps.tests.index(hlreplay.TEST_ID) if analyzer is not None and hlreplay.TEST_ID in maps.tests else None
+                    opened = None if mi is None else (lambda p: mi in maps.open2t.get(p, ()))
+                    if hlreplay.judge(files, SRC, hnotes, opened):
                         chosen = [x for x in chosen if x != n]
                         hnotes.append("dropped test_max_nodes")
                     if hnotes:

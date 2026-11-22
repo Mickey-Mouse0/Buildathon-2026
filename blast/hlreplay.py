@@ -91,16 +91,26 @@ def _static_check(old_src, new_src):
     return None
 
 
-def judge(files, src, notes):
+def judge(files, src, notes, opened_by_test=None):
     """True when test_max_nodes is sure to pass with this patch (it passes at the pinned
-    commit and touches nothing else the patch changes)."""
-    if len(files) != 1 or files[0].path != ERRORS or files[0].old_path != ERRORS or files[0].new_path != ERRORS:
+    commit and touches nothing else the patch changes). Besides errors.py the patch may
+    edit fixture files, if opened_by_test(path) says the test never opens them (the
+    coverage map records every file each test opens; test_max_nodes opens none)."""
+    ours = [fc for fc in files if fc.path == ERRORS]
+    if len(ours) != 1 or ours[0].old_path != ERRORS or ours[0].new_path != ERRORS:
         return False
+    for fc in files:
+        if fc is ours[0]:
+            continue
+        paths = {p for p in (fc.path, fc.old_path, fc.new_path) if p}
+        if opened_by_test is None or not all(
+                p.startswith("tests/fixtures/") and not p.endswith(".py") and not opened_by_test(p) for p in paths):
+            return False
     if not os.path.exists(RECORDING):
         return False
     with open(os.path.join(src, ERRORS), encoding="utf-8", newline="") as f:
         old = f.read()
-    new = files[0].apply(old)
+    new = ours[0].apply(old)
     if new is None or "�" in new:
         return False
     why = _static_check(old, new)
