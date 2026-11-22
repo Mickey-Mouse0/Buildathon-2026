@@ -44,8 +44,90 @@ WORKER_MS = 2000
 MAX_WORKERS = 8
 
 
+_probe_log = {}
+
+
 def log(*a):
     print(*a, file=sys.stderr)
+    if PROBE and a:
+        _probe_log.setdefault(str(a[0]), []).append(" ".join(map(str, a[1:])))
+
+
+# PRACTICE-BOARD PROBE, NOT AN ENTRY. For a commit whose final selection still holds
+# test_execute_tpcds it prints one worker of marker tests whose durations add up to a
+# code for WHY the test was kept; every other commit prints no tests. So
+#   simulated ms = 300000 x (commits missed) + sum over those commits of (2000 + code)
+# and the codes are chosen so that the sum of any two is different.
+PROBE = os.environ.get("BLAST_PROBE", "why")
+_TPCDS = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+WHY = {
+    "cost gate skipped the check": 1,
+    "all queries (the analyzer could not say which queries the patch reaches)": 2,
+    "over budget after the front pass": 4,
+    "over budget, stopped early": 8,
+    "a query run in full differed": 13,
+    "kept with no query run in full (front said different, or no verdict)": 21,
+    "cut off as slow": 31,
+    "import breaks: later checks skipped": 45,
+    "tpc-ds.sql query edit, kept": 66,
+    "check error or out of time": 81,
+    "no TPC log line, patch touches only sqlglot/": 97,
+    "no TPC log line, patch touches a tests/ .py file": 123,
+    "no TPC log line, patch touches another file outside sqlglot/": 148,
+    "selector fell back to every test": 182,
+}
+
+
+def probe_why(cid, chosen, files, ms, by_id):
+    import re
+
+    n = by_id.get(_TPCDS)
+    if n is None or n not in chosen:
+        return []
+    lines = _probe_log.get(cid, [])
+    text = "\n".join(lines)
+    tl = [ln for ln in lines if ln.startswith("tpc test_execute_tpcds:")]
+    paths = None if files is None else [p for fc in files for p in (fc.old_path, fc.new_path) if p is not None]
+    if paths is None or "error, running everything" in text:
+        why = "selector fell back to every test"
+    elif "import breaks: later checks skipped" in text:
+        why = "import breaks: later checks skipped"
+    elif "tpc check skipped: ~" in text:
+        why = "cost gate skipped the check"
+    elif "out of time" in text or "tpc check error" in text:
+        why = "check error or out of time"
+    elif "tpc query edit:" in text:
+        why = "tpc-ds.sql query edit, kept"
+    elif tl:
+        ln = tl[-1]
+        ran = re.search(r"(\d+) run", ln)
+        if "all queries" in ln:
+            why = "all queries (the analyzer could not say which queries the patch reaches)"
+        elif "stopped after" in ln:
+            why = "over budget, stopped early"
+        elif "over budget" in ln:
+            why = "over budget after the front pass"
+        elif "cut off as slow" in ln:
+            why = "cut off as slow"
+        elif ran and int(ran.group(1)) > 0:
+            why = "a query run in full differed"
+        else:
+            why = "kept with no query run in full (front said different, or no verdict)"
+    elif any(p.startswith("tests/") and p.endswith(".py") for p in paths):
+        why = "no TPC log line, patch touches a tests/ .py file"
+    elif any(not p.startswith("sqlglot/") for p in paths):
+        why = "no TPC log line, patch touches another file outside sqlglot/"
+    else:
+        why = "no TPC log line, patch touches only sqlglot/"
+    left, pick = WHY[why], []
+    for t in sorted((t for t in ms if 0 < ms[t] <= left and t != n), key=lambda t: (-ms[t], t)):
+        if ms[t] <= left:
+            pick.append(t)
+            left -= ms[t]
+        if not left:
+            break
+    print(cid, "PROBE why:", why, WHY[why], file=sys.stderr)
+    return [pick] if not left else [[n]]
 
 
 def pack(numbers, ms):
@@ -826,7 +908,7 @@ def main():
                 chosen = runtime_check(cid, files, chosen, ms, id_of)
             except Exception as e:
                 log(cid, "runtime check error, keeping the tests:", repr(e))
-        workers = pack(chosen, ms)
+        workers = probe_why(cid, chosen, files, ms, by_id) if PROBE == "why" else pack(chosen, ms)
         if workers:
             total += max(sum(ms[n] for n in w) for w in workers) + WORKER_MS * len(workers)
         print(json.dumps({"commit": cid, "workers": workers}), flush=True)
