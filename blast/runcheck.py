@@ -675,6 +675,136 @@ def cold(src, deps):
     os._exit(0)
 
 
+SHADOW = {"Lt": "LtE", "LtE": "Lt", "Gt": "GtE", "GtE": "Gt", "Is": "Eq", "IsNot": "NotEq"}
+CMP_UNRECORDED = ("::test_max_nodes", "::test_execute_tpcds", "::test_execute_tpch", "::test_optimized_tpch")
+
+
+def record_cmp(src, deps, out_dir):
+    """Image build: for every single comparison in sqlglot written with <, <=, >, >=, is
+    or is not, the tests in which the operator a mutation would put there (< for <=,
+    > for >=, == for is, != for is not, and back) ever gives a different answer.
+    sqlglot is imported with each such comparison rewritten into a call that works out
+    both and passes the real one on; each test then runs in its own fork of that warm
+    process. A patch that only swaps one comparison for its partner cannot change a
+    test that is not listed for it: every evaluation gives the value it gave."""
+    import ast
+    import builtins
+    import operator
+
+    sys.path.insert(0, HERE)
+    from importstate import _Overlay
+
+    ops = {"Lt": operator.lt, "LtE": operator.le, "Gt": operator.gt, "GtE": operator.ge}
+    plain = (type(None), bool, int, str, bytes)
+    inert = plain + (float, list, tuple, dict, set, frozenset)
+    sites, hit = [], set()
+
+    def identity_is_equality(a, b):
+        """Is `a == b` sure to equal `a is b`, with nothing run that could have an effect?"""
+        ta, tb = type(a), type(b)
+        if a is b:
+            return ta in plain or ta.__eq__ is object.__eq__ or ta.__module__.startswith("sqlglot")
+        if ta.__eq__ is object.__eq__ and tb.__eq__ is object.__eq__:
+            return True
+        if a is None or b is None:
+            t = tb if a is None else ta
+            return t in inert or t.__module__.startswith("sqlglot")
+        if ta in plain and tb in plain:
+            return not (a == b)
+        return False
+
+    def cmp(i, a, b):
+        name = sites[i][3]
+        if name == "Is" or name == "IsNot":
+            if not identity_is_equality(a, b):
+                hit.add(i)
+            return (a is b) if name == "Is" else (a is not b)
+        try:
+            real = ops[name](a, b)
+        except BaseException:
+            hit.add(i)
+            raise
+        try:
+            other = ops[SHADOW[name]](a, b)
+        except BaseException:
+            hit.add(i)
+            return real
+        if not (type(real) is bool and real is other):
+            hit.add(i)
+        return real
+
+    class Rewrite(ast.NodeTransformer):
+        path = None
+
+        def visit_Compare(self, node):
+            self.generic_visit(node)
+            name = type(node.ops[0]).__name__
+            if len(node.ops) != 1 or name not in SHADOW:
+                return node
+            sites.append((self.path, node.lineno, node.col_offset, name))
+            call = ast.Call(ast.Name("blast_cmp_", ast.Load()), [ast.Constant(len(sites) - 1), node.left, node.comparators[0]], [])
+            return ast.copy_location(call, node)
+
+    builtins.blast_cmp_ = cmp
+    overlay = {}
+    for root, _, names in os.walk(os.path.join(src, "sqlglot")):
+        for name in names:
+            if name.endswith(".py"):
+                full = os.path.join(root, name)
+                with open(full, encoding="utf-8") as f:
+                    tree = ast.parse(f.read())
+                r = Rewrite()
+                r.path = os.path.relpath(full, src)
+                overlay[full] = ast.unparse(ast.fix_missing_locations(r.visit(tree)))
+    sys.meta_path.insert(0, _Overlay(overlay))
+    t0 = time.process_time()
+    warm(src, deps)
+    sys.setrecursionlimit(RECURSION_LIMIT)
+    at_import = set(hit)
+    ids = []
+    for name, mod in sorted(sys.modules.items()):
+        if name.startswith("tests.") and mod is not None:
+            for cname, cls in sorted(vars(mod).items()):
+                if isinstance(cls, type) and issubclass(cls, unittest.TestCase) and cls.__module__ == name:
+                    ids += [f"{name.replace('.', '/')}.py::{cname}::{t}" for t in unittest.TestLoader().getTestCaseNames(cls)]
+    per, recorded = {}, set()
+    for tid in ids:
+        if tid.endswith(CMP_UNRECORDED):
+            continue
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(r)
+                hit.clear()
+                bad = run_tests([tid], {tid: 600.0})
+                _send(w, (sorted(hit), bool(bad)))
+            finally:
+                os._exit(0)
+        os.close(w)
+        try:
+            hits, bad = _recv(r, time.monotonic() + 900)
+            if not bad:
+                recorded.add(tid)
+                for i in hits:
+                    per.setdefault(i, set()).add(tid)
+        except Exception:
+            pass
+        os.close(r)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        os.waitpid(pid, 0)
+    table = {}
+    for i, (path, line, col, name) in enumerate(sites):
+        table.setdefault(path, {})[(line, col)] = (name, i in at_import, frozenset(per.get(i, ())))
+    with open(os.path.join(out_dir, "runcheck_cmp.pkl"), "wb") as f:
+        pickle.dump({"sites": table, "recorded": frozenset(recorded)}, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"runcheck cmp: {len(sites)} comparisons, {len(recorded)} of {len(ids)} tests recorded, "
+          f"{len(at_import)} differ at import, {time.process_time() - t0:.1f}s", file=sys.stderr)
+
+
 class Zygote:
     """The selector's handle on the zygote process; started at the first eligible commit."""
 
@@ -721,6 +851,8 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "record":
         record(os.path.abspath(sys.argv[2]), sys.argv[3], os.path.abspath(sys.argv[4]))
+    elif cmd == "cmp":
+        record_cmp(os.path.abspath(sys.argv[2]), sys.argv[3], os.path.abspath(sys.argv[4]))
     elif cmd == "cold":
         cold(os.path.abspath(sys.argv[2]), sys.argv[3])
     elif cmd == "serve":

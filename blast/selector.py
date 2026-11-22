@@ -360,6 +360,34 @@ _setup_lines = []
 
 TPC_CMP = os.environ.get("BLAST_TPC_CMP", str(HERE / "tpc_cmp.pkl"))
 _tpc_cmp = []
+# the swaps a recording exists for: runcheck.record_cmp (every test), tpcmap.build_cmp
+CMP_SWAPS = {"Lt": "LtE", "LtE": "Lt", "Gt": "GtE", "GtE": "Gt", "Is": "Eq", "IsNot": "NotEq"}
+CMP_TESTS = os.environ.get("BLAST_CMP_TESTS", str(HERE / "runcheck_cmp.pkl"))
+CMP_TESTS_RULE = os.environ.get("BLAST_CMP_TESTS_RULE", "1") == "1"
+_cmp_tests = []
+
+
+def comparison_tests(files):
+    """For a patch that is one comparison swapped for its recorded partner: the ids of
+    the tests in which the two ever disagree, and the ids whose run was recorded. A
+    recorded test outside the first set cannot change. None when no recording applies."""
+    if not _cmp_tests:
+        try:
+            with open(CMP_TESTS, "rb") as f:
+                _cmp_tests.append(pickle.load(f))
+        except (OSError, pickle.PickleError, EOFError):
+            _cmp_tests.append({})
+    data = _cmp_tests[0]
+    if not data:
+        return None
+    swap = comparison_swap(files)
+    if swap is None:
+        return None
+    path, line, col, was, now = swap
+    entry = data["sites"].get(path, {}).get((line, col))
+    if entry is None or entry[0] != was or entry[1]:
+        return None
+    return entry[2], data["recorded"]
 
 
 def comparison_swap(files):
@@ -403,7 +431,7 @@ def comparison_swap(files):
         return None
     x, y = hit
     was, now = type(x.ops[0]).__name__, type(y.ops[0]).__name__
-    if {was, now} not in ({"Lt", "LtE"}, {"Gt", "GtE"}):
+    if CMP_SWAPS.get(was) != now:
         return None
     y.ops = x.ops
     if ast.dump(a) != ast.dump(b):
@@ -825,6 +853,16 @@ def main():
         except Exception as e:
             log(cid, "error, running everything:", repr(e))
             chosen = every
+        if CMP_TESTS_RULE and chosen and files is not None and not _import_broke[0]:
+            try:
+                swapped = comparison_tests(files)
+                if swapped is not None:
+                    differ, recorded = swapped
+                    kept = [n for n in chosen if id_of[n] in differ or id_of[n] not in recorded]
+                    log(cid, f"comparison swap: the two operators disagree in {len(differ)} tests; {len(chosen)} -> {len(kept)}")
+                    chosen = kept
+            except Exception as e:
+                log(cid, "comparison swap error, keeping the tests:", repr(e))
         # A patch that breaks a module's import fails every test that loads it, in ways
         # the later checks (which reason about what the changed code computes) can't see.
         broke = _import_broke[0]
