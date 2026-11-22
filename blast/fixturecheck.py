@@ -8,6 +8,7 @@ test's loop body, run against the pinned sqlglot that this process has already i
 Any doubt (a file we don't know, a patch that doesn't apply, a check that raises
 something unexpected) keeps the tests.
 """
+import unittest  # noqa: F401  (loaded before sqlglot: see importstate.py)
 import ast
 import json
 import os

@@ -17,6 +17,10 @@ reaches. Work shared by all queries (loading the tables) counts for every one.
 "expected" records what the pinned commit computes per query: the result table
 and the DuckDB SQL. It runs at image build, so it matches the scorer's runtime.
 """
+# sqlglot is stricter once unittest or pytest is loaded (expressions/core.py UNITTEST:
+# an argument a class doesn't declare raises TypeError). Every real test runs that way,
+# so this process must too, before sqlglot is imported.
+import unittest  # noqa: F401
 import ast
 import csv
 import gzip

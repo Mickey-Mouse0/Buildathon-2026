@@ -3,6 +3,7 @@
 Reads /data/tests.json and /data/commits/*.patch, prints one JSON line a commit.
 Logs go to stderr.
 """
+import unittest  # noqa: F401  (loaded before sqlglot: see importstate.py)
 import gc
 import json
 import os

@@ -23,6 +23,10 @@ own_fn is True for a function or class defined right there with def/class.
 A digest marked opaque (see OPAQUE) means part of the value could not be read, so
 two equal digests do not prove the values are equal.
 """
+# sqlglot is stricter once unittest or pytest is loaded (expressions/core.py UNITTEST:
+# an argument a class doesn't declare raises TypeError). Every real test runs that way,
+# so this process must too, before sqlglot is imported.
+import unittest  # noqa: F401
 import enum
 import functools
 import hashlib

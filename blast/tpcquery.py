@@ -25,6 +25,7 @@ Anything unclear is "not ok", and the test stays selected.
 DuckDB, pandas and numpy are installed for this check alone, in <deps dir>, which
 nothing else puts on its path.
 """
+import unittest  # noqa: F401  (loaded before sqlglot: see importstate.py)
 import math
 import os
 import pickle
