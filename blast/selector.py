@@ -349,6 +349,8 @@ def tpc_query_edit(cid, files, chosen, ms, by_id):
 
 # the TPC check cuts off a query that takes this many times its pinned CPU (+1 s); 0: off
 TPC_SLOW_X = float(os.environ.get("BLAST_TPC_SLOW_X", "3"))
+TPC_SETTING_SITES = os.environ.get("BLAST_TPC_SETTING_SITES", "1") == "1"
+_prover = []
 TPC_SETUP_LINES = os.environ.get("BLAST_TPC_SETUP_LINES", str(HERE / "tpc_setup_lines.json"))
 # BLAST_TPC_SETUP_ALWAYS=1: rebuild every table in each check, as 57dd629 did
 TPC_SETUP_ALWAYS = os.environ.get("BLAST_TPC_SETUP_ALWAYS") == "1"
@@ -471,6 +473,20 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
         if "exec" in qm and all(f is not None for f in front_cpu[test_id]) and not NO_STAGED_TPC:
             late, _ = reached(qm["exec"])
         full = set(q) if late is None else set(late)
+        # One class setting changed and nothing else differs after import. The new value
+        # can only show where a read of it runs, and the constant lemma says which reads
+        # it cannot prove unchanged for this test. A query that runs none of those after
+        # Plan() can only differ before it, so the front pass is enough for it.
+        only = getattr(analyzer, "only_setting", None)
+        if TPC_SETTING_SITES and only is not None and _prover and late is not None and full:
+            spans = _prover[0].constant_late_lines(text, only[0], n)
+            if spans is not None:
+                ex, seen = qm["exec"]["line2t"], set()
+                for path, lo, hi in spans:
+                    for line in range(lo, hi + 1):
+                        seen |= ex.get(path, {}).get(line, frozenset())
+                log(cid, f"tpc check: setting {only[1]}: {len(full & seen)} of {len(full)} queries run an unproven read after planning")
+                full &= seen
         front = sorted(set(q) - full)
         jobs[test_id] = {"front": front, "full": sorted(full)}
         est_front += sum(front_cpu[test_id][i] for i in front)
@@ -657,6 +673,7 @@ def main():
         from prove import load_packaged
 
         prover = load_packaged(PROVER_DATA, SRC, tests)
+        _prover[:] = [prover]
         if analyzer is not None:
             use_selector_coverage(prover, maps, to_number)
         log(f"prover loaded for {len(prover.heavy)} heavy tests")

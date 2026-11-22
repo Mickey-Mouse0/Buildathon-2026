@@ -546,7 +546,17 @@ class Prover:
             return None
         return self._reads["reads"].get(name, {})
 
-    def constant_verdict(self, patch_text, ck, candidates):
+    def constant_late_lines(self, patch_text, ck, test):
+        """For a single constant swap of class setting ck: the (path, first line, last
+        line) spans holding a read of the setting that constant_verdict cannot prove
+        unchanged for this test. A stretch of the test's run that executes none of
+        those lines cannot see the new value. None when the swap or its reads can't be
+        followed at all, or the test is not profiled."""
+        spans = []
+        self.constant_verdict(patch_text, ck, [test], spans)
+        return spans[1:] if spans and spans[0] is True else None
+
+    def constant_verdict(self, patch_text, ck, candidates, spans_out=None):
         """Heavy tests among candidates that provably can't see class setting ck's
         constant change: every `.NAME` read in sqlglot, replaced by the new constant,
         leaves each expression the test evaluated with the same recorded value (or
@@ -562,6 +572,7 @@ class Prover:
         if sites is None:
             return {}, f"{name} is read some other way"
         checks = []  # (path, root, new_root, is_condition, statement range or None)
+        where = []  # per check: the lines its expression or statement spans
         for path, spots in sites.items():
             text = (self.sqlglot_dir / path).read_text()
             tree, _ = pinned_side(path, text)
@@ -603,6 +614,7 @@ class Prover:
                     if any(n in self.import_lines.get(path, set()) for n in range(statement.lineno, end + 1)):
                         return {}, "a read runs at import"
                     checks.append((path, None, None, None, (statement.lineno, end)))
+                    where.append((statement.lineno, end))
                     continue
                 if sum(isinstance(x, ast.Attribute) and x.attr == name for x in ast.walk(root)) > 1:
                     many = True
@@ -624,8 +636,9 @@ class Prover:
                             v[:] = [ast.Constant(value) if x is twin else x for x in v]
                 cond = id(root) in fc.targets(chain)[1]
                 checks.append((path, root, new_root, cond, "many" if many else None))
+                where.append((root.lineno, root.end_lineno))
         safe = {}
-        if any(root is not None and self.number_of_key.get(target_key(path, root)) is None for path, root, *_ in checks):
+        if spans_out is None and any(root is not None and self.number_of_key.get(target_key(path, root)) is None for path, root, *_ in checks):
             # a read in an expression no profile numbers: no test passes that check,
             # so no profile needs loading to say so
             candidates = ()
@@ -639,7 +652,9 @@ class Prover:
             except OSError:
                 continue
             reasons = []
-            for path, root, new_root, cond, extra in checks:
+            if spans_out is not None:
+                spans_out.append(True)
+            for (path, root, new_root, cond, extra), span in zip(checks, where):
                 if root is None:
                     ok = not self.covers(test, path, *extra)
                     why = "read never executed"
@@ -659,7 +674,10 @@ class Prover:
                         else:
                             ok, why = prove_expression(root, new_root, cond, records)
                 if not ok:
-                    break
+                    if spans_out is None:
+                        break
+                    spans_out.append((path, *span))
+                    continue
                 reasons.append(why)
             else:
                 safe[test] = f"{name} -> {value!r}: " + ("; ".join(sorted(set(reasons))) or "never read")

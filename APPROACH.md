@@ -309,3 +309,13 @@ A front query whose tree differed used to be parsed and optimized a second time 
 Measured in the image on two planted patches with the relaxed digest off so that the trees differ: same verdicts with and without (one passes all 57 queries, one fails), CPU 12.84 s to 10.92 s and 5.25 s to 4.80 s. Samples: same output as before, 94.426 s, 0 misses. `make sample` under amd64 and the larger planted run were not repeated for this change.
 
 On the practice board, with the check switched off entirely (`BLAST_TPC_GATE=0`) simulated time rises by 41.5 s and CPU falls by 18.7 s; with the runtime check off, simulated rises by 7.4 s and CPU falls by 5.0 s. Both stay on.
+
+## TPC check: a changed setting that is only read before planning
+
+A class setting on the base `Dialect` or `Generator` is read on lines every TPC-DS query runs, so its per-query map called every query "reached after planning" and the check ran all of them in full (about 18 s on the board), or skipped as too dear and kept the test. Most such flips change a branch in the parser and leave every result as it was.
+
+When the patch is a single constant swap of one setting and nothing else differs after import (`only_setting`), the constant lemma's per-read results are now used by stage. `Prover.constant_late_lines` returns the spans of the reads it cannot prove unchanged for the test; `tpc_check` keeps a query in the full-run set only if it runs one of those lines from `Plan()` on (the `exec` line map). The others can only differ before planning, which the front pass and its tree digest decide. `BLAST_TPC_SETTING_SITES=0` turns it off.
+
+Checked on one patch per class-level constant in sqlglot (1,022): it changes the split on 4 (`ALIAS_POST_TABLESAMPLE`, `SUPPORTS_LIMIT_ALL`, `ALIAS_POST_VERSION`, `SET_OP_MODIFIERS`). All four are then dropped after the front pass with every tree unchanged, and for each a full run of all reached queries with the rule off gives the pinned rows. Samples: same output, 94.426 s, 0 misses. Not rerun: `make sample` under amd64 and the planted commits.
+
+Measured on the way: of 254 one-line code edits on lines all queries reach after planning that the free stages cannot settle, 11 leave every result unchanged, with no common shape.
