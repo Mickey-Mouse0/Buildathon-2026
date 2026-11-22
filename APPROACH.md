@@ -231,10 +231,18 @@ Measured in the scorer's image under its limits (2 cores, 4 GB, read-only, user 
 
 | Set | Before | After |
 | --- | --- | --- |
-| 30 samples | 101.4 + 4.9 | 99.0 + 7.0 |
-| 30 stand-in commits (set 1) | 163.9 + 34.6 | 132.5 + 20.0 |
+| 30 samples | 101.4 + 4.9 | 99.0 + 5.6 |
+| Stand-in set 1 (30 commits) | 163.9 + 34.6 | 132.5 + 20.0 |
+| Set 2 (30) | 239.0 + 13.7 | 238.2 + 9.4 |
+| Set 3 (30) | 137.9 + 4.5 | 131.7 + 6.2 |
+| Set 4 (40) | 160.2 + 37.3 | 154.3 + 13.9 |
+| Set 5 (40) | 159.2 + 43.6 | 176.0 + 22.0 |
+| Set 6 (40) | 168.1 + 25.7 | 152.5 + 15.6 |
+| Set 7 (40) | 153.4 + 6.0 | 146.9 + 7.2 |
+| Set 8 (40) | 150.9 + 6.3 | 146.5 + 6.4 |
+| All 290 stand-in commits | 1,504.3 total | 1,378.2 total |
 
-Against the same code with both stages and the TPC check off, on 290 stand-in commits in 8 sets, the total (simulated + CPU) went from 1,518.3 s to 1,380.0 s, and every set improved (by 2.5 s to 42 s).
+The stand-in sets are single mutations from `tools/prover/make_eval_set.py`. Every set's total is lower. On set 5 main selects less, because it ran one whole TPC-DS check (17 s of CPU) that this version's budget turns down; counting only the full runs against the gain was tried and cost more CPU than it saved over the 8 sets.
 
-Checked: every test this version drops and the one without these stages keeps was run under pytest on the patched tree.
+Checked: every test this version drops and the same code without these stages keeps was run under pytest on the patched tree, in the scorer's image: 49 commits with drops out of 290 (11 of them drop `test_execute_tpcds`), 0 failures. Samples: 0 misses.
 
