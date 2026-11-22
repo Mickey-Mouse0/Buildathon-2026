@@ -289,12 +289,17 @@ TPC_EXPECTED = os.environ.get("BLAST_TPC_EXPECTED", str(HERE / "tpc_expected.pkl
 # gate decides the same way. Measured at build they swung around the gate's cutoff.
 TPC_CPU = os.environ.get("BLAST_TPC_CPU", str(HERE / "tpc_cpu.json"))
 # Run the check only when its estimated CPU (+0.5 s) is under this share of the gain.
-TPC_GATE = 0.95
+TPC_GATE = float(os.environ.get("BLAST_TPC_GATE", "0.95"))
 # Off by default: on the samples and the practice set it only added CPU (checks that
 # start and then keep the test); it paid off on planted commits only.
 NO_CONSTANT_RULE = os.environ.get("BLAST_NO_CONSTANT_RULE") == "1"
 NO_CONSTANT_LEMMA = os.environ.get("BLAST_NO_CONSTANT_LEMMA") == "1"
-NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "0") != "1"
+NO_STAGED_TPC = os.environ.get("BLAST_STAGED_TPC", "1") != "1"
+# The pinned per-query estimates against what the same queries cost under the scorer's
+# limits (17 s for the ~14.8 s of a whole TPC-DS check on the practice board).
+TPC_CPU_FACTOR = float(os.environ.get("BLAST_TPC_CPU_FACTOR", "1.2"))
+# Starting the check: python, the patched import, loading the tables.
+TPC_SETUP_S = float(os.environ.get("BLAST_TPC_SETUP_S", "2.0"))
 _tpc = []
 
 
@@ -421,7 +426,7 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
                     cpu[t], front_cpu[t] = p["cpu"], p["front"]
         _tpc.append((qmaps, cpu, front_cpu))
     qmaps, cpu, front_cpu = _tpc[0]
-    drop, jobs, est = set(), {}, 0.0
+    drop, jobs, est_front, est_full = set(), {}, 0.0, 0.0
     for test_id, qm in qmaps.items():
         # Never dropped by this check: tpc-h.sql has no executed queries, so the check
         # would only parse them, while the real test also builds and uses the tables.
@@ -456,18 +461,20 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
             late, _ = reached(qm["exec"])
         full = set(q) if late is None else set(late)
         front = sorted(set(q) - full)
-        # heaviest first: they run the most code, so a patch that changes any result
-        # most likely changes theirs, and the check stops there
-        jobs[test_id] = {"front": front, "full": sorted(full, key=lambda i: (-cpu[test_id][i], i))}
-        est += sum(cpu[test_id][i] for i in full) + sum(front_cpu[test_id][i] for i in front)
+        jobs[test_id] = {"front": front, "full": sorted(full)}
+        est_front += sum(front_cpu[test_id][i] for i in front)
+        est_full += sum(cpu[test_id][i] for i in full)
     if jobs:
         rest = [x for x in chosen if x not in drop]
         gain = cost(rest, ms) - cost([x for x in rest if x not in {by_id[t] for t in jobs}], ms)
-        # the check costs CPU whether or not it clears the tests, so only run it
-        # with a margin over what dropping them would save. With the pinned
-        # estimates (tpc_cpu.json) this runs a test_execute_tpcds check over its
-        # usual ~57 reached queries (~14.8 s) when dropping it saves over ~16.1 s.
-        if (est + 0.5) * 1000 >= TPC_GATE * gain:
+        # The check costs CPU whether or not it clears the tests. The front pass (each
+        # query as far as Plan(), ~3 s for all of TPC-DS) runs when the queries that
+        # must run in full anyway leave room under the gain. After it, the queries
+        # whose tree changed must run in full too; the child gives up when those
+        # would take more than what is left of the gain.
+        est = TPC_SETUP_S + TPC_CPU_FACTOR * (est_front + est_full)
+        allowed = TPC_GATE * gain / 1000
+        if est >= allowed:
             log(cid, f"tpc check skipped: ~{est:.1f}s of queries for {gain / 1000:.1f}s")
         elif _time_left() < 3 * est + 10:
             log(cid, f"tpc check skipped: out of time ({_time_left():.0f}s left, ~{est:.1f}s of queries)")
@@ -499,8 +506,12 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
                 if not setup:
                     log(cid, "tpc check: class setup unchanged by the patch, not rebuilt")
                 r = subprocess.run([sys.executable, str(HERE / "tpcmap.py"), "check", SRC, TPC_EXPECTED],
-                                   input=pickle.dumps({"overlay": overlay, "jobs": jobs, "setup": setup, "slow_x": TPC_SLOW_X}),
-                                   capture_output=True, env=env, timeout=min(_time_left(), max(2 * est + 3, 0.8 * gain / 1000)))
+                                   input=pickle.dumps({
+                                       "overlay": overlay, "jobs": jobs, "setup": setup, "slow_x": TPC_SLOW_X,
+                                       "cpu": {t: cpu[t] for t in jobs},
+                                       "full_budget": {t: (allowed - TPC_SETUP_S - TPC_CPU_FACTOR * est_front)
+                                                       / TPC_CPU_FACTOR for t in jobs}}),
+                                   capture_output=True, env=env, timeout=min(_time_left(), 3 * max(est, allowed) + 10))
                 verdict = pickle.loads(r.stdout) if r.returncode == 0 else {}
                 stats = verdict.get("_stats", {})
                 for test_id, qs in jobs.items():
@@ -508,7 +519,7 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
                     st = stats.get(test_id, {})
                     log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: {len(qs['front']) + len(qs['full'])} queries reached "
                              f"({len(qs['front'])} before planning only; {st.get('same_tree', 0)} same tree, {st.get('ran', 0)} run"
-                             f"{', cut off as slow' if st.get('slow') else ''}), "
+                             f"{', cut off as slow' if st.get('slow') else ''}{', over budget' if st.get('over_budget') else ''}), "
                              f"{'same results, dropped' if ok else 'kept'}")
                     if ok:
                         drop.add(by_id[test_id])

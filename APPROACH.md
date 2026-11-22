@@ -183,7 +183,7 @@ What it leans on: float sums that come out in a different order on another machi
 
 ## Staged TPC check
 
-Off by default (`BLAST_STAGED_TPC=1` turns it on). On the practice set it dropped nothing and added about 0.9 s of CPU, and it changes nothing on the samples; the gains below are on planted commits.
+On by default since "TPC check: front pass first" below (`BLAST_STAGED_TPC=0` turns it off). It was off for a while: on the practice set it dropped nothing and added about 0.9 s of CPU, and it changes nothing on the samples; the gains below are on planted commits.
 
 Each executed TPC query runs parse, optimize, plan, execute. Execution is about 80% of the cost (in the image: 10.8 s for all of TPC-DS, of which parse and optimize are 2.0 s), and most patches that reach a query only reach it before planning.
 
@@ -205,3 +205,30 @@ Rebuild the map in the pinned image: `python blast/tpcmap.py map <sqlglot> blast
 - **Constant settings skip the import diff.** When a file's whole change is one class-level line `NAME = constant` whose constant changed, no class body copies the setting, no import-time code mentions it, and the pinned import leaves it as plain data, its value is all that differs after import. The readers are taken from the map directly (`_constant_swap` and `class_attr` in `blast/analyze.py`); `BLAST_NO_CONSTANT_RULE=1` sends these to the import diff again. Same output with and without on the samples, the 30-commit set and 200 planted commits; it fires on 1 sample and 3 planted commits and saves one child process each (about 0.4 s in the image).
 - **The coverage map loads per file.** The image build rewrites `covmap.pkl.gz` uncompressed with one pickle per source file for the per-line table (`analyze.split_map`), and a file's table is unpickled the first time a patch touches it. Loading the map goes from 0.16 s to 0.08 s; output is identical to loading the whole map.
 
+## TPC check: front pass first
+
+The staged check is on again, and the check is ordered around it. It was switched off because it changed nothing on the practice set, but the final is a fresh draw of commits, and on stand-in commits most patches that reach `test_execute_tpcds` only reach it before planning.
+
+- **Front pass.** Each query the patch reaches only before `Plan()` runs as far as `Plan()`, about a fifth of a full run. Same tree and same tables as the pinned commit: done. Heaviest first, so that queries that must run in full add up fast when they are going to be too many.
+- **Probe.** As soon as one tree differs, the cheapest query that also differs runs in full. A patch that changes results usually changes many, so a real failure shows up after about one query instead of after the whole pass.
+- **Budget.** The selector passes the per-query estimates and how much CPU the full runs may cost: 95% of the gain, less the setup (2 s) and the front pass. The child stops when the queries to run in full come to more. Estimates are scaled by 1.2, the practice board's 17 s for a 14.8 s check.
+- The per-query CPU cut-off stays; a front query is held to its recorded front CPU.
+
+Measured in the scorer's image under its limits (2 cores, 4 GB, read-only, user nobody). "Before" is main at 5ebe289 (runtime check included); simulated seconds + CPU seconds.
+
+| Set | Before | After |
+| --- | --- | --- |
+| 30 samples | 99.0 + 6.7 | 99.0 + 7.6 |
+| Stand-in set 1 (30 commits) | 157.7 + 8.1 | 132.5 + 18.4 |
+| Set 2 (30) | 239.0 + 12.2 | 239.0 + 9.9 |
+| Set 3 (30) | 104.6 + 6.6 | 104.6 + 6.8 |
+| Set 4 (40) | 157.0 + 21.8 | 156.3 + 11.9 |
+| Set 5 (40) | 155.8 + 48.3 | 174.6 + 23.7 |
+| Set 6 (40) | 163.5 + 28.9 | 152.0 + 18.7 |
+| Set 7 (40) | 143.1 + 7.4 | 143.1 + 7.6 |
+| Set 8 (40) | 146.6 + 8.4 | 146.6 + 7.4 |
+| All 290 stand-in commits | 1,409.1 total | 1,353.1 total |
+
+The stand-in sets are single mutations from `tools/prover/make_eval_set.py`, one run each, so tenths are noise. Sets 3 and 7 and the samples come out 0.2 to 0.9 s higher (the front pass starting on commits where the test then stays); the other six are lower, set 6 by 21.7 s. On set 5 main selects less, because it ran one whole TPC-DS check that this version's budget turns down; it still spends 24.6 s less CPU there.
+
+Checked: every test this version drops and main keeps was run under pytest on the patched tree, in the scorer's image: 4 commits, 3 of them dropping `test_execute_tpcds`, 0 failures. Samples: 0 misses.

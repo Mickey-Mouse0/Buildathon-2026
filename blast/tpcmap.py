@@ -79,7 +79,12 @@ class _SameTree(BaseException):
     in sqlglot can swallow it."""
 
 
+class _OtherTree(BaseException):
+    """Raised at Plan() by a front pass that found a different tree."""
+
+
 SAME = object()
+OTHER = object()
 
 
 class _Slow(BaseException):
@@ -191,6 +196,8 @@ def run_query(meta, sql, schema, tables, at_plan=None, at_post=None):
         res = (tuple(table.columns), [tuple(r) for r in table.rows])
     except _SameTree:
         res = SAME
+    except _OtherTree:
+        res = OTHER
     finally:
         _hook["at_plan"] = None
     if at_post is not None:
@@ -425,7 +432,11 @@ def check(src, expected_path):
             # TPC-DS tables come from the class setup above; others load as a query
             # first needs them
             tables = dict(setup_tables) if fixture == "tpc-ds" else {}
-            for front, q in [(True, q) for q in queries["front"]] + [(False, q) for q in queries["full"]]:
+            cpu = job.get("cpu", {}).get(test_id)
+
+            def one(q, front):
+                """True: same as the pinned commit. False: differs. None (front only):
+                the tree differs at Plan(), so the query must run in full to tell."""
                 meta, sql, _ = sqls[q]
                 exp_ = expected[test_id][q]
                 if meta.get("execute"):
@@ -437,18 +448,72 @@ def check(src, expected_path):
                     if exp_.get("tree") is not None and tree_digest(tree) == exp_["tree"] \
                             and tabs_shape(tabs, _hook["needed"]) == exp_["tabs"]:
                         raise _SameTree
+                    raise _OtherTree
 
                 if slow_x:
-                    signal.setitimer(signal.ITIMER_PROF, slow_x * exp_["cpu"] + 1.0)
+                    usual = (exp_.get("front") if front else None) or exp_["cpu"]
+                    signal.setitimer(signal.ITIMER_PROF, slow_x * usual + 1.0)
                 try:
                     res, duck = run_query(meta, sql, schema, tables, at_plan if front else None)
                 finally:
                     if slow_x:
                         signal.setitimer(signal.ITIMER_PROF, 0)
+                if res is OTHER:
+                    return None if duck == exp_["duckdb"] else False
                 st["same_tree" if res is SAME else "ran"] += 1
-                if (res is not SAME and res != exp_["result"]) or duck != exp_["duckdb"]:
-                    ok = False
+                return not ((res is not SAME and res != exp_["result"]) or duck != exp_["duckdb"])
+
+            # Front queries first, only as far as Plan(): about a fifth of a full run.
+            # Those whose tree differs join the queries that must run in full. The
+            # caller says how much CPU the full runs may cost (its estimates): once
+            # they add up to more, the test stays. As soon as one tree differs, the
+            # cheapest query that also differs runs in full: a patch that changes
+            # results usually changes many, and then the rest of the pass is saved.
+            full = list(queries["full"])
+            budget = job.get("full_budget", {}).get(test_id, float("inf"))
+            need_s = sum(cpu[q] for q in full) if cpu is not None else 0.0
+            probed = set()
+            order = list(queries["front"]) if cpu is None else sorted(queries["front"], key=lambda q: (-cpu[q], q))
+            while order and ok:
+                if need_s > budget:
                     break
+                q = order.pop(0)
+                r = one(q, True)
+                if r is False:
+                    ok = False
+                elif r is None:
+                    full.append(q)
+                    if cpu is not None:
+                        need_s += cpu[q]
+                        if not probed and need_s <= budget:
+                            for c in sorted([q] + order, key=lambda x: (cpu[x], x)):
+                                if c != q:
+                                    order.remove(c)
+                                    r = one(c, True)
+                                    if r is True:
+                                        continue
+                                    if r is False:
+                                        ok = False
+                                        break
+                                    full.append(c)
+                                    need_s += cpu[c]
+                                probed.add(c)
+                                if one(c, False) is not True:
+                                    ok = False
+                                break
+            st["full_est"] = need_s
+            if ok and need_s > budget:
+                print(f"tpccheck: queries to run in full come to over ~{need_s:.1f}s: over budget", file=sys.stderr)
+                st["over_budget"] = True
+                ok = False
+            if cpu is not None:
+                # cheapest first, for the same reason as the probe
+                full.sort(key=lambda q: (cpu[q], q))
+            if ok:
+                for q in full:
+                    if q not in probed and one(q, False) is not True:
+                        ok = False
+                        break
         except _Slow:
             print("tpccheck:", test_id, "query far slower than at the pinned commit", file=sys.stderr)
             st["slow"] = True
