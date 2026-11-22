@@ -685,9 +685,14 @@ class Analyzer:
     def _diff_tests(self, before, after, notes):
         m = self.m
         bsnap, asnap = before["snap"], after["snap"]
-        if set(after["fail"]) - set(before["fail"]):
-            notes.append(f"import fails: {sorted(set(after['fail']) - set(before['fail']))[:3]}")
-            return None
+        out = set()
+        failed = set(after["fail"]) - set(before["fail"])
+        if failed:
+            notes.append(f"import fails: {sorted(failed)[:3]}")
+            s = self.failed_import_users(failed, notes)
+            if s is None:
+                return None
+            out |= s
         unstable = before.get("unstable", set())
         classes_before = {k[1] for k in bsnap if k[0] == "a"}
         if not hasattr(m, "_bases"):
@@ -696,17 +701,20 @@ class Analyzer:
                 for c in subs:
                     bases.setdefault(c, set()).add(b)
             m._bases = bases
-        out = set()
         forced = self.deferred["attrs"] if self.deferred else set()
         changed = []
         balias, aalias = before.get("alias", {}), after.get("alias", {})
         realiased = {k for k in balias.keys() | aalias.keys() if balias.get(k) != aalias.get(k)}
         for k in bsnap.keys() | asnap.keys():
+            if failed and (k[1].split(":")[0] in failed):
+                continue  # a module that no longer imports: failed_import_users covers it
             b, a = bsnap.get(k), asnap.get(k)
             if k in realiased:
                 changed.append(k)  # same contents, but now shared with another setting or no longer
                 continue
             if b == a or k in unstable:
+                continue
+            if failed and a is None and k[0] == "g" and self._import_order_only(k, b, failed, asnap):
                 continue
             if b and a and b[0].endswith("!opaque") and a[0].endswith("!opaque"):
                 if k[0] == "a" and f"{k[1]}.{k[2]}" in forced:
@@ -792,6 +800,83 @@ class Analyzer:
                 out |= s
         notes.append(f"import diff: {len(changed)} changed, {len(out)} tests")
         return out
+
+    def failed_import_users(self, failed, notes):
+        """Tests that can reach a module the patch makes fail to import (sqlglot imports
+        dialect modules lazily, so only code that loads the module sees the error): users
+        of its classes, tests running its lines, and test files that import it by name.
+        None for a module the map can't place (sqlglot itself, a package __init__)."""
+        m = self.m
+        out = set()
+        for mod in sorted(failed):
+            path = mod.replace(".", "/") + ".py"
+            table = m.line2t.get(path)
+            if mod == "sqlglot" or not mod.startswith(DIALECT_DIRS) or table is None:
+                notes.append(f"import fails in {mod}: all tests")
+                return None
+            for c in m.cls2t:
+                if c.startswith(mod + ":"):
+                    out |= m.class_usage(c)
+            for s in table.values():
+                out |= s
+            # `from sqlglot.dialects.duckdb import X`, `from sqlglot.dialects import DuckDB`
+            names = {c.split(":")[1].split(".")[0] for c in m.cls2t if c.startswith(mod + ":")}
+            names.add(mod.rsplit(".", 1)[1])
+            for f, ts in m.tests_by_file.items():
+                for node in self._test_imports(f):
+                    if node is None:
+                        return None
+                    if node[0] == mod or (node[0] or "").startswith(mod + ".") or (
+                            mod.startswith((node[0] or "") + ".") and names & node[1]):
+                        out |= ts
+                        break
+        notes.append(f"users of modules that fail to import: {len(out)}")
+        return out
+
+    def _import_order_only(self, k, b, failed, asnap):
+        """A package global that is gone only because a module failed to import: the
+        package's binding of that submodule, or a name a lazy package __getattr__ had
+        cached while the module loaded (sqlglot.dialects.Dialect), whose value is still
+        there, unchanged, in the module it comes from."""
+        _, mod, name = k
+        if f"{mod}.{name}" in failed:
+            return True
+        path = os.path.join(self.m.src, mod.replace(".", "/"), "__init__.py")
+        lazy = self.__dict__.setdefault("_lazy", {})
+        if mod not in lazy:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    lazy[mod] = "\ndef __getattr__(" in f.read()
+            except OSError:
+                lazy[mod] = False
+        if not lazy[mod] or not b[0].endswith(tuple("0123456789abcdef")):
+            return False
+        if getattr(self, "_after_vals", (None,))[0] is not asnap:
+            where = {}
+            for kk, v in asnap.items():
+                if kk[0] == "g":
+                    where.setdefault((v[0], v[1]), set()).add(kk[1])
+            self._after_vals = (asnap, where)
+        return bool(self._after_vals[1].get((b[0], b[1]), set()) - {mod})
+
+    def _test_imports(self, f):
+        """(module, imported names) for each import in test file f; [None] if unreadable."""
+        cache = self.__dict__.setdefault("_timports", {})
+        if f not in cache:
+            try:
+                with open(os.path.join(self.m.src, f), encoding="utf-8") as fh:
+                    tree = ast.parse(fh.read())
+            except (OSError, SyntaxError, ValueError):
+                cache[f] = [None]
+                return cache[f]
+            r = []
+            for n in ast.walk(tree):
+                if isinstance(n, ast.ImportFrom) and n.level == 0:
+                    r.append((n.module, {a.name for a in n.names}))
+                elif isinstance(n, ast.Import):
+                    r += [(a.name, set()) for a in n.names]
+            cache[f] = r
+        return cache[f]
 
     def enum_users(self, ck):
         """Tests running a function that uses enum class ck (or a plain alias of it,
