@@ -269,12 +269,8 @@ class Analyzer:
         if constant and not import_read and keys == own_keys:
             # One setting went from one constant to another, nothing copies it in a
             # class body and no import-time code mentions it, so its value is all that
-            # differs after import. The import diff would find just that and answer
-            # with these readers; importing the patched sqlglot to hear it is wasted.
-            for k in own_keys:
-                name = k.rsplit(".", 1)[1]
-                for sc in m.subclasses.get(ck, ()):
-                    out |= m.attr2t.get(f"{sc}.{name}", set())
+            # differs after import, and reads of it through subclasses are recorded
+            # on this class. Importing the patched sqlglot to learn that is wasted.
             notes.append(f"constant setting: {len(out)} (no import diff needed)")
             if len(own_keys) == 1:
                 self.only_setting = (ck, next(iter(own_keys)).rsplit(".", 1)[1])
