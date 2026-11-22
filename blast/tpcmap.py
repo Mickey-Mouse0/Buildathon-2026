@@ -23,6 +23,7 @@ import gzip
 import hashlib
 import os
 import pickle
+import re
 import sys
 from collections import defaultdict
 
@@ -116,9 +117,10 @@ def install_hook():
     _hook["on"] = True
 
 
-def tree_digest(root):
+def tree_digest(root, skip=()):
     """The parent link and the cached hash are derived from the rest, so they are left
-    out; every other slot of every node counts, because planning or execution may read it."""
+    out; every other slot of every node counts, because planning or execution may read it
+    (skip: slots that blind_slots() found they cannot read for this query)."""
     from sqlglot import exp
 
     h = hashlib.blake2b(digest_size=16)
@@ -130,7 +132,7 @@ def tree_digest(root):
         if r is None:
             # subclasses repeat the base's slot names: visit each name once
             names = dict.fromkeys(s for c in cls.__mro__ for s in getattr(c, "__slots__", None) or ())
-            r = slots_of[cls] = [s for s in names if s not in ("parent", "_hash", "__dict__", "__weakref__")]
+            r = slots_of[cls] = [s for s in names if s not in ("parent", "_hash", "__dict__", "__weakref__") and s not in skip]
         return r
 
     def walk(v):
@@ -163,6 +165,69 @@ def tree_digest(root):
 
     walk(root)
     return h.hexdigest()
+
+
+_SLOT_READ = re.compile(r"(?<![A-Za-z0-9_])_(type|meta)(?![A-Za-z0-9_])")
+_GENERIC_READ = re.compile(r"getattr\(|setattr\(|hasattr\(|__dict__|vars\(|__slots__|__getstate__|__setstate__|__reduce"
+                           r"|deepcopy|copy\.copy|pickle|\bdumps?\b|serde|attrgetter|__getattribute__")
+# Lines that touch _type or _meta, or reach attributes by a generic route, yet cannot
+# let them change what a query computes: Expr.__init__ sets both to None, Expr.copy and
+# __deepcopy__ only carry them into the copy, and the generator's dispatch table reads
+# methods off the generator class.
+_CARRY = {
+    "sqlglot/expressions/core.py": {
+        "self._type: DataType | None = None",
+        "self._meta: dict[str, t.Any] | None = None",
+        "copy.comments = deepcopy(node.comments)",
+        "if node._type is not None:",
+        "copy._type = deepcopy(node._type)",
+        "if node._meta is not None:",
+        "meta = copy._meta = dict(node._meta)",
+        "meta[k] = deepcopy(v)",
+        "return deepcopy(self)",
+    },
+    "sqlglot/generator.py": {"dispatch[expr_cls] = getattr(cls, attr_name)"},
+}
+
+
+def blind_slots(src, exec_lines, n):
+    """Per query, which of an expression's _type and _meta slots nothing reads from
+    Plan() until the result is back at the pinned commit: [(meta, type)] of booleans.
+
+    Every read of a slot is a line that names it (the `type` and `meta` properties and
+    is_type() are such lines in core.py) or one of the generic routes in _GENERIC_READ,
+    and Expr's hash and equality use the key and args only. So if no such line is among
+    the lines a query reaches there, a run whose tree differs only in that slot executes
+    the same lines on the same values: same plan, same generated code, same rows."""
+    blind = [[True, True] for _ in range(n)]
+    for f, lines in exec_lines.items():
+        try:
+            with open(os.path.join(src, f), encoding="utf-8") as fh:
+                text = fh.read().splitlines()
+        except OSError:
+            return [(False, False)] * n
+        carry = _CARRY.get(f, ())
+        for l, qs in lines.items():
+            line = text[l - 1].strip() if 0 < l <= len(text) else None
+            if line is None:
+                return [(False, False)] * n
+            if line in carry:
+                continue
+            hit = (True, True) if _GENERIC_READ.search(line) else \
+                tuple(k in {m.group(1) for m in _SLOT_READ.finditer(line)} for k in ("meta", "type"))
+            if hit[0] or hit[1]:
+                for q in qs:
+                    if q < n:
+                        blind[q][0] &= not hit[0]
+                        blind[q][1] &= not hit[1]
+    return [tuple(b) for b in blind]
+
+
+def relaxed_digest(tree, blind):
+    """The digest of a tree without the slots this query never reads after planning,
+    or None when it reads both."""
+    skip = tuple(s for s, b in zip(("_meta", "_type"), blind) if b)
+    return tree_digest(tree, skip) if skip else None
 
 
 def tabs_shape(tabs, needed):
@@ -275,16 +340,26 @@ def build_expected(src, out):
     sys.setrecursionlimit(20000)
     install_hook()
     result = {}
+    try:
+        with gzip.open(os.path.join(HERE, "tpc_map.pkl.gz"), "rb") as f:
+            tpc_map = pickle.load(f)
+    except OSError:
+        tpc_map = {}
     for test_id in SUITES:
         fixture, sqls, schema = suite(src, test_id)
         tables = load_tables(src, fixture, schema)
         rows = []
+        exec_lines = tpc_map.get(test_id, {}).get("exec", {}).get("line2t")
+        blind = blind_slots(src, exec_lines, len(sqls)) if exec_lines else [(False, False)] * len(sqls)
+        print(f"{test_id}: {sum(b[0] for b in blind)} queries never read _meta after planning, "
+              f"{sum(b[0] and b[1] for b in blind)} neither _meta nor _type", file=sys.stderr)
         for meta, sql, _ in sqls:
             seen = {}
 
-            def at_plan(tree, tabs):
+            def at_plan(tree, tabs, blind=blind[len(rows)]):
                 seen["front"] = time.process_time() - t
                 seen["tree"], seen["tabs"] = tree_digest(tree), tabs_shape(tabs, _hook["needed"])
+                seen["relaxed"] = relaxed_digest(tree, blind)
 
             def at_post():
                 seen["post"] = time.process_time()
@@ -293,6 +368,7 @@ def build_expected(src, out):
             res, duck = run_query(meta, sql, schema, tables, at_plan, at_post)
             end = time.process_time()
             rows.append({"result": res, "duckdb": duck, "cpu": end - t, "tree": seen.get("tree"), "tabs": seen.get("tabs"),
+                         "relaxed": seen.get("relaxed"), "blind": blind[len(rows)],
                          "front": seen["front"] + end - seen["post"] if "front" in seen else end - t})
         result[test_id] = rows
     with open(out, "wb") as f:
@@ -404,6 +480,7 @@ def check(src, expected_path):
     # A query that takes slow_x times its pinned CPU (plus 1 s) is cut off and its test
     # kept, instead of running on until the selector's overall timeout (0: off).
     slow_x = job.get("slow_x", 0)
+    relaxed = os.environ.get("BLAST_TPC_RELAXED", "1") == "1"
     if slow_x:
         import signal
 
@@ -445,8 +522,17 @@ def check(src, expected_path):
                         tables.update(pickle.loads(pickle.dumps(load_tables(src, fixture, schema, need))))
 
                 def at_plan(tree, tabs, exp_=exp_):
-                    if exp_.get("tree") is not None and tree_digest(tree) == exp_["tree"] \
-                            and tabs_shape(tabs, _hook["needed"]) == exp_["tabs"]:
+                    if exp_.get("tree") is None or tabs_shape(tabs, _hook["needed"]) != exp_["tabs"]:
+                        raise _OtherTree
+                    if tree_digest(tree) == exp_["tree"]:
+                        raise _SameTree
+                    # The tree may still differ only in slots this query never reads after
+                    # planning. Copying carries those slots along, so the copies made
+                    # there must work on this tree too.
+                    want = exp_.get("relaxed") if relaxed else None
+                    if want and relaxed_digest(tree, exp_["blind"]) == want:
+                        tree.copy()
+                        st["relaxed"] = st.get("relaxed", 0) + 1
                         raise _SameTree
                     raise _OtherTree
 

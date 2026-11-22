@@ -243,3 +243,15 @@ Two additions to the runtime check, both aimed at small selections of light test
 Measured in the image (native arm64, the scorer's limits): the samples go from 98.97 s to 94.43 s with 0 misses, which is the cost of selecting exactly the failing tests. `5y72` now runs its 3 tests for 0.34 s of CPU instead of 1.19 s and drops them; `ktz3` (a class-level dict) runs in a fresh process for 0.31 s and drops its 3. On 200 planted commits, 5 change (6.7 s less), and no dropped test is one the labels say fails.
 
 Not checked under `linux/amd64` on an Apple Silicon Mac: the recording step dies there with "Illegal instruction" inside the emulator, so the runtime check is off in that build and `make sample` gives 101.357 s with 0 misses.
+
+## TPC check: trees that differ only in slots nothing reads
+
+A front query used to count as unchanged only when its whole optimized tree matched the pinned one. Many optimizer patches change nothing but type annotations (`_type`) or node metadata (`_meta`): the SQL text, the plan, the generated Python and the rows are all the same, yet every query then had to run in full (about 20 s of CPU on the board) or the test stayed (21.5 s).
+
+- **Which slots a query can read after planning.** `blind_slots` (image build) takes the lines each query reaches from `Plan()` on, from `tpc_map.pkl.gz`, and looks for any line that names `_type` or `_meta`, or that reaches attributes by a generic route (`getattr`, `__dict__`, `__slots__`, `deepcopy`, pickling). The `type` and `meta` properties and `is_type()` are themselves such lines in `expressions/core.py`, so a call to them is seen. `Expr.__hash__` and `__eq__` use the key and args only. The only hits are `Expr.__init__`, `copy`/`__deepcopy__` (which carry both slots into the copy and read nothing from them) and the generator's dispatch table; those lines are listed by their text in `_CARRY`. One query also reaches `is_type()` (`ArrayConcat` in the Python generator).
+- **Result:** after planning, all 99 TPC-DS queries never read `_meta`, and 98 read neither slot.
+- **The rule.** `expected` stores a second digest per query that leaves those slots out. In `check`, a front query whose full digest differs but whose relaxed digest and tables match is treated as unchanged: the run from `Plan()` on executes the same lines on the same values, apart from copies carrying different annotations. The check also copies the whole tree once, so a copy that would fail on the new annotations keeps the test. `BLAST_TPC_RELAXED=0` turns the rule off.
+
+Measured in the image (native arm64): samples unchanged at 94.426 s. On 200 planted commits, three change (`annotate_types.py`, `qualify.py`, `normalize_identifiers.py`): `test_execute_tpcds` is dropped after the front pass alone, 40.3 s less in total. For each of the three, all 57 executed queries were run on the patched code and gave the pinned rows, and the real test was run alone under pytest: 57 subtests pass.
+
+GC settings for the check were measured too (default, disabled, frozen after the tables load): 11.1 s against 10.4 to 10.9 s for a full TPC-DS pass, so they were left alone.
