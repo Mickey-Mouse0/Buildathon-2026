@@ -523,6 +523,10 @@ def main():
         text = patch.read_text(errors="replace")
         try:
             files = patchutil.parse(text)
+            # a section with no ---/+++ lines (a pure rename or mode change, an empty or
+            # binary file) parses to nothing and would otherwise select no tests for it
+            if sum(1 for ln in text.splitlines() if ln.startswith("diff --git ")) != len(files):
+                files = None
         except Exception:
             files = None
         try:
@@ -570,7 +574,7 @@ def main():
         broke = _import_broke[0]
         if broke:
             log(cid, "import breaks: later checks skipped")
-        if prover is not None and chosen and not broke:
+        if prover is not None and chosen and not broke and files is not None:
             try:
                 patch_text = patch.read_text(errors="replace")
                 all_safe, why = prover.union_verdict(patch_text)
@@ -589,7 +593,7 @@ def main():
                         log(cid, "prover dropped", dropped)
             except Exception as e:
                 log(cid, "prover error, keeping the selector's tests:", repr(e))
-        if tok is not None and chosen and not broke:
+        if tok is not None and chosen and not broke and files is not None:
             try:
                 tnotes = []
                 chosen = tokenizer_replay(tok, maps, patchutil.parse(patch.read_text(errors="replace")), chosen, ms, tnotes)
