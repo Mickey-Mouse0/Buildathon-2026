@@ -58,7 +58,7 @@ def log(*a):
 # code for WHY the test was kept; every other commit prints no tests. So
 #   simulated ms = 300000 x (commits missed) + sum over those commits of (2000 + code)
 # and the codes are chosen so that the sum of any two is different.
-PROBE = os.environ.get("BLAST_PROBE", "why")
+PROBE = os.environ.get("BLAST_PROBE", "tpc")
 _TPCDS = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
 WHY = {
     "cost gate skipped the check": 1,
