@@ -520,6 +520,7 @@ def tpc_check(cid, analyzer, files, text, chosen, ms, by_id):
                     st = stats.get(test_id, {})
                     log(cid, f"tpc {test_id.rsplit('::', 1)[1]}: {len(qs['front']) + len(qs['full'])} queries reached "
                              f"({len(qs['front'])} before planning only; {st.get('same_tree', 0)} same tree, {st.get('ran', 0)} run"
+                             f"{', %d equal apart from _meta' % st['same_but_meta'] if st.get('same_but_meta') else ''}"
                              f"{', cut off as slow' if st.get('slow') else ''}{', over budget' if st.get('over_budget') else ''}), "
                              f"{'same results, dropped' if ok else 'kept'}")
                     if ok:

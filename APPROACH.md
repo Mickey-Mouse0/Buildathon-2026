@@ -243,3 +243,15 @@ Two additions to the runtime check, both aimed at small selections of light test
 Measured in the image (native arm64, the scorer's limits): the samples go from 98.97 s to 94.43 s with 0 misses, which is the cost of selecting exactly the failing tests. `5y72` now runs its 3 tests for 0.34 s of CPU instead of 1.19 s and drops them; `ktz3` (a class-level dict) runs in a fresh process for 0.31 s and drops its 3. On 200 planted commits, 5 change (6.7 s less), and no dropped test is one the labels say fails.
 
 Not checked under `linux/amd64` on an Apple Silicon Mac: the recording step dies there with "Illegal instruction" inside the emulator, so the runtime check is off in that build and `make sample` gives 101.357 s with 0 misses.
+
+## TPC check: trees equal apart from `_meta`
+
+Some optimizer patches change only what the optimizer notes on nodes (`_meta`), for example `store_original_column_identifiers=True` to `False` in `qualify`. The full tree digest then differs for most queries, the front pass clears none of them, and a full run costs about what dropping `test_execute_tpcds` saves, so the test stayed.
+
+- At image build, `tpcmap.py expected` makes a second pass over the executed queries with reads of `Expression._meta` watched from `Plan()` until the result is back (`record_meta_free`). On all 57 executed TPC-DS queries the only reader is the node copier (`__deepcopy__`), which copies the dict and looks at nothing in it. Each such query gets a second digest, `tree_nometa`, that leaves `_meta` out.
+- In `check`, a front query whose full digest differs but whose `tree_nometa` matches counts as the same tree. Up to the first read of a differing `_meta` the run is the pinned one, and there is no such read, so planning and execution do the same.
+- Not used when the patch touches `sqlglot/expressions/core.py`: the copier's branch for nodes that carry `_meta` may never have run at the pinned commit, so the map could call a patch there unreached when it is not.
+- `comments` stays in the digest: the generator reads it during execution.
+
+Measured against main at 51b56c8 on the samples and the 8 stand-in sets: one commit of 320 changes (set 1, the `qualify` flag above: 42 of 57 trees equal apart from `_meta`), from 25.5 s to 12.1 s simulated, with the check's CPU unchanged at about 4 s. `test_execute_tpcds` passes on that commit under pytest. 0 misses on the 217 stand-in commits labeled with pytest so far and on the samples.
+

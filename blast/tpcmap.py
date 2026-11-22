@@ -116,7 +116,7 @@ def install_hook():
     _hook["on"] = True
 
 
-def tree_digest(root):
+def tree_digest(root, skip=()):
     """The parent link and the cached hash are derived from the rest, so they are left
     out; every other slot of every node counts, because planning or execution may read it."""
     from sqlglot import exp
@@ -130,7 +130,8 @@ def tree_digest(root):
         if r is None:
             # subclasses repeat the base's slot names: visit each name once
             names = dict.fromkeys(s for c in cls.__mro__ for s in getattr(c, "__slots__", None) or ())
-            r = slots_of[cls] = [s for s in names if s not in ("parent", "_hash", "__dict__", "__weakref__")]
+            r = slots_of[cls] = [s for s in names if s not in ("parent", "_hash", "__dict__", "__weakref__")
+                                 and s not in skip]
         return r
 
     def walk(v):
@@ -269,6 +270,64 @@ def build_map(src, out):
         pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+# The one function allowed to read a node's _meta from Plan() on: it copies the dict
+# along with the node and looks at nothing in it.
+META_COPIER = ("expressions/core.py", "__deepcopy__")
+
+
+def record_meta_free(src, result):
+    """Second pass over the executed queries, with reads of Expression._meta watched
+    from Plan() until the result is back. Where the only reader is the node copier,
+    planning and execution never look at _meta, so they run the same on any tree that
+    is equal apart from _meta: such a query gets "tree_nometa", the digest without it.
+    (Up to the first read of a differing _meta the run is the pinned one, and there is
+    no such read.)"""
+    from sqlglot import exp
+
+    holder = next((c for c in exp.Column.__mro__ if type(c.__dict__.get("_meta")).__name__ == "member_descriptor"), None)
+    if holder is None:
+        return
+    slot = holder.__dict__["_meta"]
+    state = {"on": False, "readers": set()}
+
+    def get(self):
+        if state["on"]:
+            f = sys._getframe(1)
+            state["readers"].add((f.f_code.co_filename.replace(os.sep, "/").rsplit("sqlglot/", 1)[-1], f.f_code.co_name))
+        return slot.__get__(self, type(self))
+
+    setattr(holder, "_meta", property(get, lambda self, v: slot.__set__(self, v), lambda self: slot.__delete__(self)))
+    try:
+        for test_id in SUITES:
+            fixture, sqls, schema = suite(src, test_id)
+            tables = load_tables(src, fixture, schema)
+            for row, (meta, sql, _) in zip(result[test_id], sqls):
+                if row.get("tree") is None:
+                    continue
+                state["readers"] = set()
+                seen = {}
+
+                def at_plan(tree, tabs):
+                    seen["nometa"] = tree_digest(tree, ("_meta",))
+                    seen["same"] = tree_digest(tree) == row["tree"]
+                    state["on"] = True
+
+                def at_post():
+                    state["on"] = False
+
+                try:
+                    res, _duck = run_query(meta, sql, schema, tables, at_plan, at_post)
+                finally:
+                    state["on"] = False
+                if seen.get("same") and res == row["result"] and state["readers"] <= {META_COPIER}:
+                    row["tree_nometa"] = seen["nometa"]
+    finally:
+        setattr(holder, "_meta", slot)
+    n = sum(1 for rows in result.values() for r in rows if r.get("tree") is not None)
+    k = sum(1 for rows in result.values() for r in rows if r.get("tree_nometa") is not None)
+    print(f"tpcmap: {k} of {n} executed queries never read _meta from Plan() on", file=sys.stderr)
+
+
 def build_expected(src, out):
     import time
 
@@ -295,6 +354,7 @@ def build_expected(src, out):
             rows.append({"result": res, "duckdb": duck, "cpu": end - t, "tree": seen.get("tree"), "tabs": seen.get("tabs"),
                          "front": seen["front"] + end - seen["post"] if "front" in seen else end - t})
         result[test_id] = rows
+    record_meta_free(src, result)
     with open(out, "wb") as f:
         pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
 
@@ -408,6 +468,10 @@ def check(src, expected_path):
         import signal
 
         signal.signal(signal.SIGPROF, _on_slow)
+    # The node copier is the one reader of _meta after Plan(). Its branch for a node
+    # that has _meta may never have run at the pinned commit, so a patch to its file
+    # could be reached there without the map knowing: no shortcut for such a patch.
+    nometa_ok = not any(k.replace(os.sep, "/").endswith("sqlglot/" + META_COPIER[0]) for k in job["overlay"])
     slow = False
     try:
         # skipped when the selector found the patch can't change it (setup_lines)
@@ -445,9 +509,15 @@ def check(src, expected_path):
                         tables.update(pickle.loads(pickle.dumps(load_tables(src, fixture, schema, need))))
 
                 def at_plan(tree, tabs, exp_=exp_):
-                    if exp_.get("tree") is not None and tree_digest(tree) == exp_["tree"] \
-                            and tabs_shape(tabs, _hook["needed"]) == exp_["tabs"]:
-                        raise _SameTree
+                    if exp_.get("tree") is not None and tabs_shape(tabs, _hook["needed"]) == exp_["tabs"]:
+                        if tree_digest(tree) == exp_["tree"]:
+                            raise _SameTree
+                        # equal apart from _meta, which planning and execution of this
+                        # query never read (record_meta_free)
+                        if nometa_ok and exp_.get("tree_nometa") is not None \
+                                and tree_digest(tree, ("_meta",)) == exp_["tree_nometa"]:
+                            st["same_but_meta"] = st.get("same_but_meta", 0) + 1
+                            raise _SameTree
                     raise _OtherTree
 
                 if slow_x:
