@@ -505,6 +505,17 @@ def main():
                     log(cid, "; ".join(tnotes))
             except Exception as e:
                 log(cid, "tokenizer replay error, keeping the tests:", repr(e))
+        if chosen and files is not None:
+            try:
+                import fixturecheck
+
+                fnotes = []
+                safe = fixturecheck.judge(files, chosen, by_id, SRC, fnotes)
+                if fnotes:
+                    log(cid, "; ".join(fnotes))
+                chosen = [n for n in chosen if n not in safe]
+            except Exception as e:
+                log(cid, "fixture check error, keeping the tests:", repr(e))
         if analyzer is not None and chosen and files is not None:
             try:
                 chosen = tpc_check(cid, analyzer, files, text, chosen, ms, by_id)
