@@ -558,7 +558,8 @@ def runtime_check(cid, files, chosen, ms, id_of):
     run = [n for n in chosen if ms[n] <= RUNCHECK_MAX_MS and not id_of[n].startswith(EXECUTOR_FILE + "::TestExecutor::test_execute_")]
     if not run:
         return chosen
-    rest = [n for n in chosen if n not in set(run)]
+    run_set = set(run)
+    rest = [n for n in chosen if n not in run_set]
     gain = cost(chosen, ms) - cost(rest, ms)
     budget = min(RUNCHECK_CAP_S, RUNCHECK_SHARE * gain / 1000)
     if budget < 0.05:
@@ -612,7 +613,7 @@ def runtime_check(cid, files, chosen, ms, id_of):
     if "*" in bad:
         log(cid, f"runtime check: setup error, kept ({resp['cpu']:.2f}s)")
         return chosen
-    keep = [n for n in chosen if n in set(rest) or id_of[n] in bad]
+    keep = [n for n in chosen if n not in run_set or id_of[n] in bad]
     log(cid, f"runtime check: ran {len(run)} tests{fresh} ({resp['cpu']:.2f}s CPU, predicted {resp['pred']:.2f}s), "
              f"{len(bad)} fail, dropped {len(chosen) - len(keep)}; " + ", ".join(
                  f"{t.rsplit('::', 1)[1]} {c:.2f}" for t, c in sorted(resp.get("tcpu", {}).items(), key=lambda x: -x[1])[:3]))
@@ -729,9 +730,8 @@ def main():
             log(cid, "import breaks: later checks skipped")
         if prover is not None and chosen and not broke and files is not None:
             try:
-                patch_text = patch.read_text(errors="replace")
-                all_safe, why = prover.union_verdict(patch_text)
-                verdict = None if all_safe else prover.verdict(patch_text)
+                all_safe, why = prover.union_verdict(text)
+                verdict = None if all_safe else prover.verdict(text)
                 if all_safe:
                     kept = [n for n in chosen if n not in prover.union_profiled]
                     log(cid, f"prover: every profiled test unaffected ({why}); keeping {len(kept)} unprofiled")
@@ -749,17 +749,20 @@ def main():
         only = getattr(analyzer, "only_setting", None) if analyzer is not None else None
         if prover is not None and only is not None and chosen and not broke and files is not None and not NO_CONSTANT_LEMMA:
             try:
-                safe, why = prover.constant_verdict(patch.read_text(errors="replace"), only[0],
-                                                    [n for n in chosen if n in prover.profiles])
-                if safe:
-                    chosen = [n for n in chosen if n not in safe]
-                log(cid, f"constant lemma ({why}): dropped {sorted(safe)}")
+                # the lemma can only drop profiled tests: with none chosen there is
+                # nothing for it to say
+                heavy = [n for n in chosen if n in prover.profiles]
+                if heavy:
+                    safe, why = prover.constant_verdict(text, only[0], heavy)
+                    if safe:
+                        chosen = [n for n in chosen if n not in safe]
+                    log(cid, f"constant lemma ({why}): dropped {sorted(safe)}")
             except Exception as e:
                 log(cid, "constant lemma error, keeping the tests:", repr(e))
         if tok is not None and chosen and not broke and files is not None:
             try:
                 tnotes = []
-                chosen = tokenizer_replay(tok, maps, patchutil.parse(patch.read_text(errors="replace")), chosen, ms, tnotes)
+                chosen = tokenizer_replay(tok, maps, files, chosen, ms, tnotes)
                 if tnotes:
                     log(cid, "; ".join(tnotes))
             except Exception as e:

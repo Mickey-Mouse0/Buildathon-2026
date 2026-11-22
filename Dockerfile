@@ -21,10 +21,14 @@ RUN pip install --no-cache-dir --root-user-action=ignore --target /opt/tpcdeps -
 COPY blast /app/blast
 COPY tools/build_importstate.sh /app/tools/build_importstate.sh
 # The pinned commit's result for every recorded tokenizer call, made in this image
-# so the selector's replays of the patched tokenizer compare like with like.
+# so the selector's replays of the patched tokenizer compare like with like. The replay
+# is off by default (BLAST_TOKREPLAY_ON), and without this file it stays off, so the
+# 36 s it takes are spent only when asked for: --build-arg BLAST_TOKREPLAY_BUILD=1
+ARG BLAST_TOKREPLAY_BUILD=0
 RUN sh /app/tools/build_importstate.sh /opt/sqlglot /app/blast/importstate.pkl \
-    && PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tokreplay.py base /opt/sqlglot \
-       /app/blast/tokreplay.pkl.xz /app/blast/tokreplay_base.pkl \
+    && { [ "$BLAST_TOKREPLAY_BUILD" != 1 ] \
+         || PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tokreplay.py base /opt/sqlglot \
+            /app/blast/tokreplay.pkl.xz /app/blast/tokreplay_base.pkl; } \
     && PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcmap.py expected /opt/sqlglot /app/blast/tpc_expected.pkl \
     && (PYTHONDONTWRITEBYTECODE=1 python /app/blast/tpcmap.py rows /opt/sqlglot /app/blast/tpc_rows.pkl \
         || (rm -f /app/blast/tpc_rows.pkl; echo "tpc rows failed: the check parses the fixture tables itself")) \
