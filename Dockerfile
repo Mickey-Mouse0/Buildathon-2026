@@ -50,4 +50,6 @@ RUN sh /app/tools/build_importstate.sh /opt/sqlglot /app/blast/importstate.pkl \
     && python -c "import compileall; compileall.compile_dir('/app/blast', quiet=1)"
 
 ENV PYTHONDONTWRITEBYTECODE=1
+# Practice-board measurement, not our candidate entry: the runtime check (warm process and fresh-process runs) is off, so its CPU and what it saves can be read off the board.
+ENV BLAST_RUNCHECK=0
 CMD ["python", "/app/blast/selector.py"]
