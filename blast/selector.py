@@ -366,11 +366,19 @@ def comparison_swap(files):
     """(path, line, column, old operator, new operator) when the whole patch is one
     comparison in one sqlglot file changed between < and <= or between > and >=."""
     import ast
+    import re
 
     if len(files) != 1:
         return None
     fc = files[0]
     if fc.old_path is None or fc.old_path != fc.new_path or not (fc.path.startswith("sqlglot/") and fc.path.endswith(".py")):
+        return None
+    # Parsing a 9,000-line file twice costs real CPU: do it only when the patch is one
+    # line replaced by one line that differs in nothing but comparison operators.
+    minus = [ln[1:] for _, _, lines in fc.hunks for ln in lines if ln.startswith("-")]
+    plus = [ln[1:] for _, _, lines in fc.hunks for ln in lines if ln.startswith("+")]
+    blank = lambda ln: re.sub(r"<=|>=|==|!=|<|>|\bis not\b|\bis\b", "?", ln)
+    if len(minus) != 1 or len(plus) != 1 or minus == plus or blank(minus[0]) != blank(plus[0]):
         return None
     with open(os.path.join(SRC, fc.old_path), encoding="utf-8") as f:
         old = f.read()
