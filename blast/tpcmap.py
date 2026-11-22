@@ -537,6 +537,7 @@ def check(src, expected_path):
     # kept, instead of running on until the selector's overall timeout (0: off).
     slow_x = job.get("slow_x", 0)
     relaxed = os.environ.get("BLAST_TPC_RELAXED", "1") == "1"
+    early = int(os.environ.get("BLAST_TPC_EARLY", "6"))
     if slow_x:
         import signal
 
@@ -573,7 +574,10 @@ def check(src, expected_path):
                 meta, sql, _ = sqls[q]
                 exp_ = expected[test_id][q]
                 if meta.get("execute"):
-                    need = {t.name for t in find_tables(parse_one(sql))} - tables.keys()
+                    # the tables the pinned run handed on; a patched parse that wants
+                    # another one finds it missing in run_query and the test stays
+                    names = [n for _, n, *_ in exp_["tabs"][0]] if exp_.get("tabs") else [None]
+                    need = (set(names) if None not in names else {t.name for t in find_tables(parse_one(sql))}) - tables.keys()
                     if need:
                         tables.update(pickle.loads(pickle.dumps(load_tables(src, fixture, schema, need, cache=True))))
 
@@ -616,11 +620,29 @@ def check(src, expected_path):
             need_s = sum(cpu[q] for q in full) if cpu is not None else 0.0
             probed = set()
             order = list(queries["front"]) if cpu is None else sorted(queries["front"], key=lambda q: (-cpu[q], q))
+            tried = [0, 0.0, 0.0]
+
+            def note(q, r):
+                if cpu is not None:
+                    tried[0] += 1
+                    tried[1] += cpu[q]
+                    tried[2] += cpu[q] if r is None else 0.0
+                return r
+
             while order and ok:
                 if need_s > budget:
                     break
+                # Heading for "over budget": if the share of tried queries whose tree
+                # differs holds for the rest, the full runs will not fit. Stop and keep
+                # the test now, not after the whole pass.
+                if early and cpu is not None and tried[0] >= early and tried[1] > 0:
+                    projected = need_s + tried[2] / tried[1] * sum(cpu[x] for x in order)
+                    if projected > budget:
+                        st["early"] = tried[0]
+                        need_s = projected
+                        break
                 q = order.pop(0)
-                r = one(q, True)
+                r = note(q, one(q, True))
                 if r is False:
                     ok = False
                 elif r is None:
@@ -631,7 +653,7 @@ def check(src, expected_path):
                             for c in sorted([q] + order, key=lambda x: (cpu[x], x)):
                                 if c != q:
                                     order.remove(c)
-                                    r = one(c, True)
+                                    r = note(c, one(c, True))
                                     if r is True:
                                         continue
                                     if r is False:

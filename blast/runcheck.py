@@ -35,8 +35,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # would break stays selected; pytest's own frames are far fewer than the margin.
 RECURSION_LIMIT = 900
 SLICED = ("tests.test_optimizer",)
-# predicted CPU of a test run here, per second it took under pytest (median ~0.7, p90 ~1.1)
-PRED_X = float(os.environ.get("BLAST_RUNCHECK_PRED_X", "1.4"))
+# predicted CPU of a test run here, per second it took under pytest. Measured on the scorer's
+# scale (twice the image's native CPU): dialect and executor tests ~0.9, others ~1.3.
+PRED_X = float(os.environ.get("BLAST_RUNCHECK_PRED_X", "0.8"))
 POOLED = ("tests.test_optimizer", "tests.test_executor")
 # A fresh process that imports the patched sqlglot (cold): what its start costs, and
 # what DuckDB, pandas and numpy add when a selected test's module imports them.
@@ -338,7 +339,28 @@ def _switch(ek):
         rec["cpu"][rec["at"]] = rec["cpu"].get(rec["at"], 0.0) + now - rec["t"]
         rec["at"], rec["t"] = ek, now
         rec["sets"].setdefault(ek, set())
+        _reset_containers()
         sys.monitoring.restart_events()
+
+
+def _snapshot_containers():
+    """sqlglot's module-level dicts, lists and sets as they are after warm-up. Some are
+    per-process caches (generator._DISPATCH_CACHE): the code that fills one runs for the
+    first entry that needs it and for no later one, so without a reset the later
+    entries would be recorded as never reaching it and be skipped for a patch there."""
+    STATE["snap"] = [(v, v.copy()) for name, mod in list(sys.modules.items())
+                     if mod is not None and (name == "sqlglot" or name.startswith("sqlglot."))
+                     for v in list(vars(mod).values()) if type(v) in (dict, list, set)]
+
+
+def _reset_containers():
+    for val, saved in STATE.get("snap", ()):
+        if len(val) != len(saved):
+            if isinstance(val, list):
+                val[:] = saved
+            else:
+                val.clear()
+                val.update(saved)
 
 
 def install_slicing():
@@ -376,17 +398,38 @@ def record_slices(test_ids, src):
 
     sys.monitoring.use_tool_id(TOOL, "blast-slice")
     sys.monitoring.register_callback(TOOL, sys.monitoring.events.PY_START, cb)
+    _snapshot_containers()
     for tid in test_ids:
-        STATE.update(cur=None, rec={"sets": {None: set()}, "cpu": {}, "at": None, "t": time.process_time()},
-                     filters={})
-        sys.monitoring.set_events(TOOL, sys.monitoring.events.PY_START)
-        sys.monitoring.restart_events()
-        bad = run_tests([tid], {tid: 600.0})
-        sys.monitoring.set_events(TOOL, 0)
-        rec = STATE["rec"]
-        rec["cpu"][rec["at"]] = rec["cpu"].get(rec["at"], 0.0) + time.process_time() - rec["t"]
-        out[tid] = (rec["sets"], rec["cpu"], sorted(bad))
-        STATE.update(rec=None, cur=None)
+        # each test in its own fork of the warm process, which is the state a check
+        # starts from: what an earlier test left in a cache must not hide code this
+        # test's entries depend on
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(r)
+                STATE.update(cur=None, rec={"sets": {None: set()}, "cpu": {}, "at": None, "t": time.process_time()},
+                             filters={})
+                sys.monitoring.set_events(TOOL, sys.monitoring.events.PY_START)
+                sys.monitoring.restart_events()
+                bad = run_tests([tid], {tid: 600.0})
+                sys.monitoring.set_events(TOOL, 0)
+                rec = STATE["rec"]
+                rec["cpu"][rec["at"]] = rec["cpu"].get(rec["at"], 0.0) + time.process_time() - rec["t"]
+                _send(w, (rec["sets"], rec["cpu"], sorted(bad)))
+            finally:
+                os._exit(0)
+        os.close(w)
+        try:
+            out[tid] = _recv(r, time.monotonic() + 900)
+        except Exception:
+            out[tid] = ({}, {}, ["*"])  # no recording: the test is never sliced
+        os.close(r)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        os.waitpid(pid, 0)
     sys.monitoring.free_tool_id(TOOL)
     return out
 
